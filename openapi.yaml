@@ -29,10 +29,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [user_id, message]
+              required: [message]   # user_id no longer required
               properties:
                 user_id:
                   type: string
+                  nullable: true
+                user_email:
+                  type: string
+                  nullable: true
                 session_id:
                   type: string
                   nullable: true
@@ -72,10 +76,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [user_id, type, content]
+              required: [type, content]   # user_id no longer required
               properties:
                 user_id:
                   type: string
+                  nullable: true
+                user_email:
+                  type: string
+                  nullable: true
                 type:
                   type: string
                   enum: [episodic, semantic, procedural]
@@ -117,37 +125,4 @@ paths:
                   type: array
                   items:
                     type: object
-                    required: [user_id, text, type]
-                    properties:
-                      user_id:
-                        type: string
-                      text:
-                        type: string
-                      type:
-                        type: string
-                        enum: [semantic, episodic]
-                      tags:
-                        type: array
-                        items:
-                          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  created_ids:
-                    type: array
-                    items:
-                      type: string
-components:
-  schemas: {}   # keep as an object; add models here later if you want
-  securitySchemes:
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
-
-
+                    requi
