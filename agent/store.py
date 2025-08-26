@@ -6,8 +6,10 @@ def is_uuid(val: str) -> bool:
     return bool(re.match(r"^[0-9a-fA-F-]{36}$", val or ""))
 
 def upsert_user(email: str) -> dict:
-    # upsert by unique email
-    res = supabase.table("users").upsert({"email": email}, on_conflict="email").select("*").execute()
+    # 1) Upsert by unique email (don’t chain .select() here)
+    supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
+    # 2) Read the row back
+    res = supabase.table("users").select("*").eq("email", email).limit(1).execute()
     return res.data[0]
 
 def get_user(user_id: str) -> Optional[dict]:
