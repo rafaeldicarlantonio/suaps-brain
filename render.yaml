@@ -26,3 +26,6 @@ services:
     - key: ALLOWED_ORIGINS
       value: https://chat.openai.com
   healthCheckPath: /healthz
+envVars:
+  - key: PYTHON_VERSION
+    value: 3.11.9
