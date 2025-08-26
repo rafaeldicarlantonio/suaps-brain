@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+openai>=1.30.0
+pinecone-client
+supabase
+python-ulid
+pydantic
+python-dotenv
+pypdf

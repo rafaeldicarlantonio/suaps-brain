@@ -1,0 +1,103 @@
+openapi: 3.1.0
+info:
+  title: SUAPS Agent API
+  version: "1.0.0"
+servers:
+  - url: https://YOUR-RENDER-URL.onrender.com
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      responses:
+        "200":
+          description: OK
+  /chat:
+    post:
+      operationId: chat
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, message]
+              properties:
+                user_id: { type: string }
+                session_id: { type: string, nullable: true }
+                message: { type: string }
+                history:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [user, assistant, system] }
+                      content: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string }
+                  answer: { type: string }
+  /memories/upsert:
+    post:
+      operationId: upsertMemory
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, type, content]
+              properties:
+                user_id: { type: string }
+                type: { type: string, enum: [episodic, semantic, procedural] }
+                title: { type: string }
+                content: { type: string }
+                importance: { type: integer, default: 3 }
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: OK
+  /ingest/batch:
+    post:
+      operationId: ingestBatch
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [user_id, text, type]
+                    properties:
+                      user_id: { type: string }
+                      text: { type: string }
+                      type: { type: string, enum: [semantic, episodic] }
+                      tags:
+                        type: array
+                        items: { type: string }
+      responses:
+        "200":
+          description: OK
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key

@@ -1,0 +1,28 @@
+services:
+- type: web
+  name: suaps-agent
+  runtime: python
+  buildCommand: pip install -r requirements.txt
+  startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
+  envVars:
+    - key: OPENAI_API_KEY
+      sync: false
+    - key: SUPABASE_URL
+      sync: false
+    - key: SUPABASE_SERVICE_ROLE_KEY
+      sync: false
+    - key: PINECONE_API_KEY
+      sync: false
+    - key: PINECONE_INDEX
+      value: memories
+    - key: PINECONE_CLOUD
+      value: aws
+    - key: PINECONE_REGION
+      value: us-east-1
+    - key: ACTIONS_API_KEY
+      sync: false
+    - key: APP_ENV
+      value: prod
+    - key: ALLOWED_ORIGINS
+      value: https://chat.openai.com
+  healthCheckPath: /healthz
