@@ -1,7 +1,7 @@
 name: Ingest ClickUp Wiki to Pinecone
 
 on:
-  workflow_dispatch: {}    # run manually from Actions tab
+  workflow_dispatch: {}      # run manually from Actions tab
   push:
     paths:
       - 'wiki/**.md'
@@ -20,22 +20,29 @@ jobs:
           python-version: '3.11'
 
       - name: Build ingest payload (Markdown -> JSON)
-        id: payload
+        shell: bash
         run: |
           python scripts/make_ingest_payload.py "${{ secrets.SUAPS_USER_EMAIL }}" > payload.json
-          echo "len=$(jq '.items | length' payload.json)" >> $GITHUB_OUTPUT
-          echo "payload=$(cat payload.json | jq -c '.')" >> $GITHUB_OUTPUT
+          echo "Built payload.json"
+          jq -r '.items | length' payload.json > item_count.txt
 
       - name: Show item count
-        run: echo "Items to ingest: ${{ steps.payload.outputs.len }}"
+        shell: bash
+        run: |
+          echo "Items to ingest: $(cat item_count.txt)"
 
       - name: POST to /ingest/batch
-        if: ${{ steps.payload.outputs.len != '0' }}
+        shell: bash
         env:
           API_URL: https://suaps-brain.onrender.com/ingest/batch
           API_KEY: ${{ secrets.SUAPS_ACTIONS_API_KEY }}
         run: |
+          ITEMS=$(cat item_count.txt)
+          if [ "$ITEMS" -eq 0 ]; then
+            echo "No items to ingest; skipping."
+            exit 0
+          fi
           curl -sS -X POST "$API_URL" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $API_KEY" \
-            -d '${{ steps.payload.outputs.payload }}'
+            --data-binary @payload.json
