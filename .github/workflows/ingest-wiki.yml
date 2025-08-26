@@ -9,7 +9,6 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,19 +19,15 @@ jobs:
           python-version: '3.11'
 
       - name: Build ingest payload (Markdown -> JSON)
-        shell: bash
         run: |
           python scripts/make_ingest_payload.py "${{ secrets.SUAPS_USER_EMAIL }}" > payload.json
           echo "Built payload.json"
           jq -r '.items | length' payload.json > item_count.txt
 
       - name: Show item count
-        shell: bash
-        run: |
-          echo "Items to ingest: $(cat item_count.txt)"
+        run: echo "Items to ingest: $(cat item_count.txt)"
 
-            - name: POST to /ingest/batch
-        shell: bash
+      - name: POST to /ingest/batch
         env:
           API_URL: https://suaps-brain.onrender.com/ingest/batch
           API_KEY: ${{ secrets.SUAPS_ACTIONS_API_KEY }}
@@ -51,4 +46,3 @@ jobs:
           echo "HTTP $HTTP_CODE"
           echo "Response body:" && cat resp.json && echo
           test "$HTTP_CODE" = "200"
-
