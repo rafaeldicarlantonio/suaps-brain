@@ -44,7 +44,7 @@ class MemoryUpsert(BaseModel):
     importance: int = 3
     tags: list[str] = []
 
-@app.post("/memories/upsert")
+
 @app.post("/memories/upsert")
 def memories_upsert(body: MemoryUpsert, x_api_key: str | None = Header(None)):
     auth(x_api_key)
@@ -67,17 +67,21 @@ class IngestItem(BaseModel):
 @app.post("/ingest/batch")
 def ingest_batch(body: dict, x_api_key: str | None = Header(None)):
     auth(x_api_key)
-    items = body.get("items", [])
-    out = []
-    for it in items:
-        if it.get("type") == "semantic":
-            ids = distill_chunk(user_id=it["user_id"], raw_text=it["text"], base_tags=it.get("tags",[]), make_qa=True)
-            out.extend(ids)
-        else:
-            row = store.upsert_memory(it["user_id"], "episodic", "", it["text"], 4, it.get("tags",[]))
-            retrieval.upsert_memory_vector(row["id"], it["user_id"], "episodic", it["text"], "", it.get("tags",[]), 4)
-            out.append(row["id"])
-    return {"created_ids": out}
+    try:
+        items = body.get("items", [])
+        out = []
+        for it in items:
+            if it.get("type") == "semantic":
+                ids = distill_chunk(user_id=it["user_id"], raw_text=it["text"], base_tags=it.get("tags",[]), make_qa=True)
+                out.extend(ids)
+            else:
+                row = store.upsert_memory(it["user_id"], "episodic", "", it["text"], 4, it.get("tags",[]))
+                retrieval.upsert_memory_vector(row["id"], it["user_id"], "episodic", it["text"], "", it.get("tags",[]), 4)
+                out.append(row["id"])
+        return {"created_ids": out}
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Ingest error: {ex}")
+
 
 from vendors.openai_client import client as _openai
 from vendors.pinecone_client import pc as _pc, INDEX as _pine_index
