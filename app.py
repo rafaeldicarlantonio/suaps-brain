@@ -24,9 +24,17 @@ def auth(x_api_key: str | None):
 @app.post("/chat")
 def chat(body: ChatInput, x_api_key: str | None = Header(None)):
     auth(x_api_key)
-    session = {"id": body.session_id} if body.session_id else store.create_session(body.user_id)
-    answer = pipeline.run_chat(body.user_id, session["id"], body.history, body.message)
-    return {"session_id": session["id"], "answer": answer}
+    try:
+        session = {"id": body.session_id} if body.session_id else store.create_session(body.user_id)
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Supabase session error: {ex}")
+
+    try:
+        answer = pipeline.run_chat(body.user_id, session["id"], body.history, body.message)
+        return {"session_id": session["id"], "answer": answer}
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Chat pipeline error: {ex}")
+
 
 class MemoryUpsert(BaseModel):
     user_id: str
@@ -37,12 +45,16 @@ class MemoryUpsert(BaseModel):
     tags: list[str] = []
 
 @app.post("/memories/upsert")
+@app.post("/memories/upsert")
 def memories_upsert(body: MemoryUpsert, x_api_key: str | None = Header(None)):
     auth(x_api_key)
-    from agent import retrieval, store
-    row = store.upsert_memory(body.user_id, body.type, body.title, body.content, body.importance, body.tags)
-    retrieval.upsert_memory_vector(row["id"], body.user_id, body.type, body.content, body.title, body.tags, body.importance)
-    return {"id": row["id"]}
+    try:
+        row = store.upsert_memory(body.user_id, body.type, body.title, body.content, body.importance, body.tags)
+        retrieval.upsert_memory_vector(row["id"], body.user_id, body.type, body.content, body.title, body.tags, body.importance)
+        return {"id": row["id"]}
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Upsert memory error: {ex}")
+
 
 from agent.ingest import distill_chunk
 
