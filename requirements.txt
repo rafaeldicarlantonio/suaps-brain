@@ -1,7 +1,10 @@
 fastapi
 uvicorn[standard]
 openai>=1.30.0
-pinecone-client
+pinecone           # HTTP (default)
+# or, for faster IO over gRPC:
+# pinecone[grpc]
+
 supabase
 python-ulid
 pydantic
