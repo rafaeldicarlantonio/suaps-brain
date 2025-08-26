@@ -9,6 +9,12 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
+
+    # Make all `run:` steps use bash, consistently
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -20,29 +26,34 @@ jobs:
 
       - name: Build ingest payload (Markdown -> JSON)
         run: |
+          set -euo pipefail
           python scripts/make_ingest_payload.py "${{ secrets.SUAPS_USER_EMAIL }}" > payload.json
           echo "Built payload.json"
           jq -r '.items | length' payload.json > item_count.txt
 
       - name: Show item count
-        run: echo "Items to ingest: $(cat item_count.txt)"
+        run: |
+          set -euo pipefail
+          COUNT="$(cat item_count.txt)"
+          echo "Items to ingest -> ${COUNT}"
 
       - name: POST to /ingest/batch
         env:
           API_URL: https://suaps-brain.onrender.com/ingest/batch
           API_KEY: ${{ secrets.SUAPS_ACTIONS_API_KEY }}
         run: |
-          ITEMS=$(cat item_count.txt)
-          if [ "$ITEMS" -eq 0 ]; then
+          set -euo pipefail
+          COUNT="$(cat item_count.txt)"
+          if [ "${COUNT}" = "0" ]; then
             echo "No items to ingest; skipping."
             exit 0
           fi
-          echo "Posting $ITEMS items to $API_URL ..."
+          echo "Posting ${COUNT} items to ${API_URL} ..."
           HTTP_CODE=$(curl -sS -o resp.json -w "%{http_code}" \
-            -X POST "$API_URL" \
+            -X POST "${API_URL}" \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: $API_KEY" \
+            -H "X-API-Key: ${API_KEY}" \
             --data-binary @payload.json)
-          echo "HTTP $HTTP_CODE"
+          echo "HTTP ${HTTP_CODE}"
           echo "Response body:" && cat resp.json && echo
-          test "$HTTP_CODE" = "200"
+          test "${HTTP_CODE}" = "200"
