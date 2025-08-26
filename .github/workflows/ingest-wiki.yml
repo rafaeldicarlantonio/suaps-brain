@@ -1,7 +1,7 @@
 name: Ingest ClickUp Wiki to Pinecone
 
 on:
-  workflow_dispatch: {}   # run manually
+  workflow_dispatch: {}    # run manually from Actions tab
   push:
     paths:
       - 'wiki/**.md'
@@ -9,52 +9,28 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Find Markdown files
-        id: files
-        run: |
-          echo "LIST<<EOF" >> $GITHUB_OUTPUT
-          find wiki -type f -name "*.md"
-          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Build JSON payload
+      - name: Build ingest payload (Markdown -> JSON)
         id: payload
         run: |
-          USER_EMAIL="${{ secrets.SUAPS_USER_EMAIL }}"
-          TMP=$(mktemp)
-          echo -n '{"items":[' > "$TMP"
-          FIRST=1
-          while read -r f; do
-            [ -z "$f" ] && continue
-            TEXT=$(python3 - <<'PY'
-import sys, json
-p=sys.argv[1]
-with open(p,'r',encoding='utf-8') as fh:
-    t=fh.read()
-print(json.dumps(t))
-PY
-"$f")
-            TAGS=$(python3 - <<'PY'
-import sys, json, os
-p=sys.argv[1]
-tags=["clickup","wiki",p.replace("wiki/","").replace(".md","").replace("/","_")]
-print(json.dumps(tags))
-PY
-"$f")
-            ITEM="{\"user_email\":\"$USER_EMAIL\",\"type\":\"semantic\",\"text\":$TEXT,\"tags\":$TAGS}"
-            if [ $FIRST -eq 1 ]; then
-              echo -n "$ITEM" >> "$TMP"; FIRST=0
-            else
-              echo -n ",$ITEM" >> "$TMP"
-            fi
-          done <<< "${{ steps.files.outputs.LIST }}"
-          echo -n ']}' >> "$TMP"
-          echo "payload=$(cat $TMP)" >> $GITHUB_OUTPUT
+          python scripts/make_ingest_payload.py "${{ secrets.SUAPS_USER_EMAIL }}" > payload.json
+          echo "len=$(jq '.items | length' payload.json)" >> $GITHUB_OUTPUT
+          echo "payload=$(cat payload.json | jq -c '.')" >> $GITHUB_OUTPUT
+
+      - name: Show item count
+        run: echo "Items to ingest: ${{ steps.payload.outputs.len }}"
 
       - name: POST to /ingest/batch
+        if: ${{ steps.payload.outputs.len != '0' }}
         env:
           API_URL: https://suaps-brain.onrender.com/ingest/batch
           API_KEY: ${{ secrets.SUAPS_ACTIONS_API_KEY }}
