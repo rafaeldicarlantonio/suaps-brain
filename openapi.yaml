@@ -3,7 +3,7 @@ info:
   title: SUAPS Agent API
   version: "1.0.0"
 servers:
-  - url: https://YOUR-RENDER-URL.onrender.com
+  - url: https://suaps-brain.onrender.com
 paths:
   /healthz:
     get:
