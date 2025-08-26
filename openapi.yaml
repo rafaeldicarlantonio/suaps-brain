@@ -125,4 +125,39 @@ paths:
                   type: array
                   items:
                     type: object
-                    requi
+                    required: [text, type]   # user_id no longer required
+                    properties:
+                      user_id:
+                        type: string
+                        nullable: true
+                      user_email:
+                        type: string
+                        nullable: true
+                      text:
+                        type: string
+                      type:
+                        type: string
+                        enum: [semantic, episodic]
+                      tags:
+                        type: array
+                        items:
+                          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created_ids:
+                    type: array
+                    items:
+                      type: string
+components:
+  schemas: {}
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
