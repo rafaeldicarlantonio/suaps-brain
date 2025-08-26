@@ -31,7 +31,7 @@ jobs:
         run: |
           echo "Items to ingest: $(cat item_count.txt)"
 
-      - name: POST to /ingest/batch
+            - name: POST to /ingest/batch
         shell: bash
         env:
           API_URL: https://suaps-brain.onrender.com/ingest/batch
@@ -42,7 +42,13 @@ jobs:
             echo "No items to ingest; skipping."
             exit 0
           fi
-          curl -sS -X POST "$API_URL" \
+          echo "Posting $ITEMS items to $API_URL ..."
+          HTTP_CODE=$(curl -sS -o resp.json -w "%{http_code}" \
+            -X POST "$API_URL" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $API_KEY" \
-            --data-binary @payload.json
+            --data-binary @payload.json)
+          echo "HTTP $HTTP_CODE"
+          echo "Response body:" && cat resp.json && echo
+          test "$HTTP_CODE" = "200"
+
