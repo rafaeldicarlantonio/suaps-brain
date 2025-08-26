@@ -2,14 +2,17 @@ import os
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from agent import store, pipeline
+from typing import Optional
+
 
 API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 
 app = FastAPI(title="SUAPS Agent API")
 
 class ChatInput(BaseModel):
-    user_id: str
-    session_id: str | None = None
+    user_id: Optional[str] = None          # now optional
+    user_email: Optional[str] = None       # new
+    session_id: Optional[str] = None
     message: str
     history: list[dict] = []  # [{'role':'user'|'assistant','content': '...'}]
 
@@ -25,41 +28,52 @@ def auth(x_api_key: str | None):
 def chat(body: ChatInput, x_api_key: str | None = Header(None)):
     auth(x_api_key)
     try:
-        session = {"id": body.session_id} if body.session_id else store.create_session(body.user_id)
+        # ensure we have a user row and get its UUID
+        user_row = store.ensure_user(body.user_id, body.user_email)
+        uid = user_row["id"]
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"user resolution error: {ex}")
+
+    try:
+        session = {"id": body.session_id} if body.session_id else store.create_session(uid)
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Supabase session error: {ex}")
 
     try:
-        answer = pipeline.run_chat(body.user_id, session["id"], body.history, body.message)
+        answer = pipeline.run_chat(uid, session["id"], body.history, body.message)
         return {"session_id": session["id"], "answer": answer}
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Chat pipeline error: {ex}")
 
 
 class MemoryUpsert(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
     type: str
     title: str = ""
     content: str
     importance: int = 3
     tags: list[str] = []
 
-
 @app.post("/memories/upsert")
 def memories_upsert(body: MemoryUpsert, x_api_key: str | None = Header(None)):
     auth(x_api_key)
     try:
-        row = store.upsert_memory(body.user_id, body.type, body.title, body.content, body.importance, body.tags)
-        retrieval.upsert_memory_vector(row["id"], body.user_id, body.type, body.content, body.title, body.tags, body.importance)
+        user_row = store.ensure_user(body.user_id, body.user_email)
+        uid = user_row["id"]
+        row = store.upsert_memory(uid, body.type, body.title, body.content, body.importance, body.tags)
+        retrieval.upsert_memory_vector(row["id"], uid, body.type, body.content, body.title, body.tags, body.importance)
         return {"id": row["id"]}
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Upsert memory error: {ex}")
 
 
+
 from agent.ingest import distill_chunk
 
 class IngestItem(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
     text: str
     type: str = "semantic"
     tags: list[str] = []
@@ -71,16 +85,21 @@ def ingest_batch(body: dict, x_api_key: str | None = Header(None)):
         items = body.get("items", [])
         out = []
         for it in items:
+            # resolve user for each item
+            user_row = store.ensure_user(it.get("user_id"), it.get("user_email"))
+            uid = user_row["id"]
+
             if it.get("type") == "semantic":
-                ids = distill_chunk(user_id=it["user_id"], raw_text=it["text"], base_tags=it.get("tags",[]), make_qa=True)
+                ids = distill_chunk(user_id=uid, raw_text=it["text"], base_tags=it.get("tags",[]), make_qa=True)
                 out.extend(ids)
             else:
-                row = store.upsert_memory(it["user_id"], "episodic", "", it["text"], 4, it.get("tags",[]))
-                retrieval.upsert_memory_vector(row["id"], it["user_id"], "episodic", it["text"], "", it.get("tags",[]), 4)
+                row = store.upsert_memory(uid, "episodic", "", it["text"], 4, it.get("tags",[]))
+                retrieval.upsert_memory_vector(row["id"], uid, "episodic", it["text"], "", it.get("tags",[]), 4)
                 out.append(row["id"])
         return {"created_ids": out}
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Ingest error: {ex}")
+
 
 
 from vendors.openai_client import client as _openai
