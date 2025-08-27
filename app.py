@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from agent import store, pipeline
 from typing import Optional
 
@@ -10,11 +10,25 @@ API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 app = FastAPI(title="SUAPS Agent API")
 
 class ChatInput(BaseModel):
-    user_id: Optional[str] = None          # now optional
-    user_email: Optional[str] = None       # new
-    session_id: Optional[str] = None
+    user_id: str | None = None
+    user_email: str | None = None
+    session_id: str | None = None
     message: str
-    history: list[dict] = []  # [{'role':'user'|'assistant','content': '...'}]
+    history: list[dict] = []
+    # Optional chat randomness (0.0–1.2). If None, use backend default.
+    temperature: float | None = Field(default=None, description="0.0–1.2")
+
+    @field_validator("temperature")
+    @classmethod
+    def _clamp_temp(cls, v):
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except Exception:
+            return None
+       # Clamp to a safe range; upstream may still ignore it.
+        return max(0.0, min(1.2, v))
 
 @app.get("/healthz")
 def healthz():
@@ -27,6 +41,10 @@ def auth(x_api_key: str | None):
 @app.post("/chat")
 def chat(body: ChatInput, x_api_key: str | None = Header(None)):
     auth(x_api_key)
+     user_row = store.ensure_user(body.user_id, body.user_email)
+     session_id, answer = pipeline.chat(
+         user_id=user_row["id"],
+         session_id=body.session_id,
     try:
         # ensure we have a user row and get its UUID
         user_row = store.ensure_user(body.user_id, body.user_email)
