@@ -83,22 +83,27 @@ def ingest_batch(body: dict, x_api_key: str | None = Header(None)):
     auth(x_api_key)
     try:
         items = body.get("items", [])
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
         out = []
         for it in items:
-            # resolve user for each item
             user_row = store.ensure_user(it.get("user_id"), it.get("user_email"))
             uid = user_row["id"]
-
+            t = (it.get("text") or "").strip()
+            if not t:
+                continue
             if it.get("type") == "semantic":
-                ids = distill_chunk(user_id=uid, raw_text=it["text"], base_tags=it.get("tags",[]), make_qa=True)
+                ids = distill_chunk(user_id=uid, raw_text=t, base_tags=it.get("tags",[]), make_qa=True)
                 out.extend(ids)
             else:
-                row = store.upsert_memory(uid, "episodic", "", it["text"], 4, it.get("tags",[]))
-                retrieval.upsert_memory_vector(row["id"], uid, "episodic", it["text"], "", it.get("tags",[]), 4)
+                row = store.upsert_memory(uid, "episodic", "", t, 4, it.get("tags",[]))
+                retrieval.upsert_memory_vector(row["id"], uid, "episodic", t, "", it.get("tags",[]), 4)
                 out.append(row["id"])
         return {"created_ids": out}
     except Exception as ex:
+        # echo exact error text to client for debugging
         raise HTTPException(status_code=502, detail=f"Ingest error: {ex}")
+
 
 
 
