@@ -1,22 +1,42 @@
-import os, re, json, hashlib
+import os, re, json, hashlib, logging
 from typing import List
 from vendors.openai_client import client
 from agent import store, retrieval
+log = logging.getLogger("ingest")
 
-SUMMARIZER_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-mini")
+SUMMARIZER_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "4000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "400"))
 MAKE_QA = os.getenv("MAKE_QA", "true").lower() == "true"
 DEDUP_THRESHOLD = float(os.getenv("DEDUP_THRESHOLD", "0.92"))
 
-def llm_json(prompt: str, text: str):
-    msg = [
-        {"role":"system","content":"Return strict JSON only, no commentary."},
-        {"role":"user","content": prompt + "\n\n---\n" + text[:8000]}
-    ]
-    out = client.chat.completions.create(model=SUMMARIZER_MODEL, messages=msg, temperature=0.2)
-    import json
-    return json.loads(out.choices[0].message.content)
+def llm_json(prompt: str, text: str) -> dict:
+    """
+    Ask the model for strict JSON. If parsing fails, return a minimal fallback.
+    """
+    try:
+        msgs = [
+            {"role": "system", "content": "You are a data distiller. Return ONLY valid JSON."},
+            {"role": "user", "content": prompt + "\n\n---\n" + text[:8000]},
+        ]
+        # Enforce JSON object output (supported by GPT-4o/mini; ignored by older models)
+        resp = client.chat.completions.create(
+            model=SUMMARIZER_MODEL,
+            messages=msgs,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or ""
+        return json.loads(raw)
+    except Exception as ex:
+        # Fallback: minimal metadata; keep pipeline moving
+        log.warning("llm_json fallback: %s", ex)
+        snippet = re.sub(r"\s+", " ", text).strip()[:1000]
+        return {
+            "title": "Auto summary",
+            "summary": snippet,
+            "tags": [],
+        }
 
 def clean_text(t: str) -> str:
     t = t.replace("\x00", " ").replace("\r", "\n")
