@@ -10,25 +10,25 @@ API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 app = FastAPI(title="SUAPS Agent API")
 
 class ChatInput(BaseModel):
-    user_id: str | None = None
-    user_email: str | None = None
-    session_id: str | None = None
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    session_id: Optional[str] = None
     message: str
-    history: list[dict] = []
-    # Optional chat randomness (0.0–1.2). If None, use backend default.
-    temperature: float | None = Field(default=None, description="0.0–1.2")
+    history: List[Dict] = []
+    temperature: Optional[float] = Field(None, description="0.0–1.2")
 
-    @field_validator("temperature")
+   @field_validator("temperature")
     @classmethod
-    def _clamp_temp(cls, v):
+    def clamp_temp(cls, v):
         if v is None:
             return None
         try:
             v = float(v)
         except Exception:
             return None
-       # Clamp to a safe range; upstream may still ignore it.
         return max(0.0, min(1.2, v))
+
+def auth(x_api_key: Optional[str]):
 
 @app.get("/healthz")
 def healthz():
@@ -39,12 +39,18 @@ def auth(x_api_key: str | None):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 @app.post("/chat")
-def chat(body: ChatInput, x_api_key: str | None = Header(None)):
+def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
-     user_row = store.ensure_user(body.user_id, body.user_email)
-     session_id, answer = pipeline.chat(
-         user_id=user_row["id"],
-         session_id=body.session_id,
+
+    user_row = store.ensure_user(body.user_id, body.user_email)
+    session_id, answer = pipeline.chat(
+        user_id=user_row["id"],
+        session_id=body.session_id,
+        message=body.message,
+        history=body.history,
+        temperature=body.temperature,  # may be None
+    )
+    return {"session_id": session_id, "answer": answer}
     try:
         # ensure we have a user row and get its UUID
         user_row = store.ensure_user(body.user_id, body.user_email)
