@@ -6,6 +6,62 @@ servers:
   - url: https://suaps-brain.onrender.com
 
 paths:
+/upload:
+  post:
+    operationId: upload
+    requestBody:
+      required: true
+      content:
+        multipart/form-data:
+          schema:
+            type: object
+            properties:
+              file:
+                type: string
+                format: binary
+              tags:
+                type: string
+    responses:
+      "200":
+        description: Upload + ingest started
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_id: { type: string }
+                bytes: { type: integer }
+                mime_type: { type: string }
+                ingest_ids: { type: array, items: { type: string } }
+                latency_ms: { type: integer }
+/debug/memories:
+  get:
+    operationId: debugMemories
+    parameters:
+      - in: query
+        name: limit
+        schema: { type: integer, default: 20 }
+      - in: query
+        name: type
+        schema: { type: string, nullable: true }
+    responses:
+      "200":
+        description: Latest memories
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      type: { type: string }
+                      title: { type: string }
+                      tags: { type: array, items: { type: string } }
+                      created_at: { type: string }
   /healthz:
     get:
       operationId: healthz
