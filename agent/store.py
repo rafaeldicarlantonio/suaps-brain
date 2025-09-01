@@ -11,7 +11,7 @@ from vendors.supabase_client import supabase
 def upsert_user(email: str) -> Dict[str, Any]:
     """
     Idempotently create (or fetch) a user by email.
-    Supabase-py v2: upsert + select to return the row.
+    Supabase-py v2: .upsert(...).execute(); then .select(...) to fetch.
     """
     supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
     res = supabase.table("users").select("*").eq("email", email).limit(1).execute()
@@ -48,15 +48,27 @@ def ensure_user(user_id: Optional[str], user_email: Optional[str]) -> Dict[str, 
 def create_session(user_id: str) -> Dict[str, Any]:
     """
     Create a session row for the user and return at least an id.
+
+    NOTE: In supabase-py v2 you cannot chain .select() after .insert().
     """
-    ins = supabase.table("sessions").insert({"user_id": user_id}).select("id").execute()
-    if not ins.data:
-        # Some stacks require a follow-up select
-        sel = supabase.table("sessions").select("id").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
-        if not sel.data:
-            raise RuntimeError("failed to create/select session")
-        return {"id": sel.data[0]["id"]}
-    return {"id": ins.data[0]["id"]}
+    ins = supabase.table("sessions").insert({"user_id": user_id}).execute()
+    # Many projects configure PostgREST to return the inserted row; if not, fetch it.
+    if ins.data and isinstance(ins.data, list) and ins.data:
+        row = ins.data[0]
+        # If server didn't include id, fallback to select
+        if "id" in row and row["id"]:
+            return {"id": row["id"]}
+    sel = (
+        supabase.table("sessions")
+        .select("id")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not sel.data:
+        raise RuntimeError("failed to create/select session")
+    return {"id": sel.data[0]["id"]}
 
 
 # ----------------------------
@@ -73,37 +85,37 @@ def upsert_memory(
     """
     Insert a memory row.
 
-    IMPORTANT: Your DB has a NOT NULL constraint on `value`. To satisfy the schema
-    while keeping the API's `content` field, we write BOTH `content` and `value`.
+    IMPORTANT: DB has NOT NULL on `value`. We write BOTH `content` and `value`.
+    Supabase v2: call .insert(...).execute(); don't chain .select().
     """
     payload = {
         "user_id": user_id,
         "type": type_,
         "title": title or "",
-        "content": content,           # API's field
-        "value": content,             # satisfy DB constraint
+        "content": content,   # API field
+        "value": content,     # satisfy DB constraint
         "importance": importance,
         "tags": tags or [],
     }
 
-    res = supabase.table("memories").insert(payload).select("id").execute()
-    if not res.data:
-        # Older PostgREST setups sometimes return no data on insert without .select().execute()
-        # Fallback to selecting the newest row for this user with the same title+content.
-        sel = (
-            supabase.table("memories")
-            .select("id")
-            .eq("user_id", user_id)
-            .eq("title", payload["title"])
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not sel.data:
-            raise RuntimeError("insert memory returned no row")
-        return {"id": sel.data[0]["id"]}
+    ins = supabase.table("memories").insert(payload).execute()
+    if ins.data and isinstance(ins.data, list) and ins.data:
+        row = ins.data[0]
+        if "id" in row and row["id"]:
+            return {"id": row["id"]}
 
-    return {"id": res.data[0]["id"]}
+    # Fallback select by user + latest created (avoid strict content match if text is large)
+    sel = (
+        supabase.table("memories")
+        .select("id")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not sel.data:
+        raise RuntimeError("insert memory returned no row")
+    return {"id": sel.data[0]["id"]}
 
 
 # ----------------------------
@@ -115,5 +127,5 @@ def log_message(session_id: str, role: str, content: str) -> None:
             {"session_id": session_id, "role": role, "content": content}
         ).execute()
     except Exception:
-        # Don't break the request if logging fails
+        # Non-fatal
         pass
