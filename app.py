@@ -40,11 +40,12 @@ def _is_uuid(s: Optional[str]) -> bool:
 
 def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
     """
-    Option A: normalize ANY input into a real UUID from `users`.
-      - if user_email provided -> upsert/select by email
-      - else if user_id is UUID -> select by id
-      - else if user_id is not UUID -> treat as email/alias
-      - else -> fallback to anonymous
+    Normalize ANY input into a real UUID from `users`.
+    Priority:
+      1) user_email provided -> upsert/select by email
+      2) user_id is UUID     -> select by id
+      3) user_id not UUID    -> treat as email/alias
+      4) none provided       -> anonymous
     """
     if not user_email and user_id and not _is_uuid(user_id):
         user_email = user_id
@@ -57,7 +58,7 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
 # Models
 # --------------------------------------------------------------------
 class ChatInput(BaseModel):
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None        # read-only-ish; ignored for writes
     user_email: Optional[str] = None
     session_id: Optional[str] = None
     message: str
@@ -76,6 +77,7 @@ class ChatInput(BaseModel):
         return max(0.0, min(1.2, v))
 
 class MemoryUpsert(BaseModel):
+    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
     user_id: Optional[str] = None
     user_email: Optional[str] = None
     type: str
@@ -85,6 +87,7 @@ class MemoryUpsert(BaseModel):
     tags: List[str] = []
 
 class IngestItem(BaseModel):
+    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
     user_id: Optional[str] = None
     user_email: Optional[str] = None
     text: str
@@ -139,11 +142,10 @@ def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
 def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
     try:
-        user_row = _resolve_user(body.user_id, body.user_email)
-        uid = user_row["id"]  # <-- always a UUID now
-        row = store.upsert_memory(
-            uid, body.type, body.title, body.content, body.importance, body.tags
-        )
+        # HARD STOP: ignore incoming user_id; always resolve to a UUID
+        user_row = _resolve_user(None, body.user_email if body.user_email else body.user_id)
+        uid = user_row["id"]
+        row = store.upsert_memory(uid, body.type, body.title, body.content, body.importance, body.tags)
         retrieval.upsert_memory_vector(
             mem_id=row["id"],
             user_id=uid,
@@ -166,8 +168,10 @@ def ingest_batch(body: IngestBatch, x_api_key: Optional[str] = Header(None)):
     try:
         out: List[str] = []
         for it in body.items:
-            user_row = _resolve_user(it.user_id, it.user_email)
-            uid = user_row["id"]  # <-- always a UUID
+            # HARD STOP: ignore incoming user_id; always resolve to a UUID
+            email_or_alias = it.user_email if it.user_email else it.user_id
+            user_row = _resolve_user(None, email_or_alias)
+            uid = user_row["id"]
             t = (it.text or "").strip()
             if not t:
                 continue
