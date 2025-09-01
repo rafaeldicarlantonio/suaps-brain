@@ -4,6 +4,8 @@ import uuid
 from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Header, HTTPException
+from router.upload import router as upload_router
+from router.debug import router as debug_router
 from pydantic import BaseModel, Field, field_validator
 
 from agent import store, pipeline, retrieval
