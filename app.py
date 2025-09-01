@@ -14,15 +14,20 @@ from agent.ingest import distill_chunk
 # --------------------------------------------------------------------
 API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
 
 app = FastAPI(title="SUAPS Agent API")
 
 # --------------------------------------------------------------------
-# Security
+# Security (bypass when DISABLE_AUTH=true)
 # --------------------------------------------------------------------
 def auth(x_api_key: Optional[str]):
+    if DISABLE_AUTH:
+        return  # auth disabled for now
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Unauthorized: missing X-API-Key header")
     if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Unauthorized: invalid X-API-Key value")
 
 def _is_uuid(s: Optional[str]) -> bool:
     if not s:
@@ -39,10 +44,13 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
       - user_email provided  -> upsert by email
       - user_id is UUID      -> resolve by UUID
       - user_id is non-UUID  -> treat as email/alias and upsert by that
+    If neither is provided, fallback to a deterministic 'anonymous' email.
     """
     if not user_email and user_id and not _is_uuid(user_id):
         user_email = user_id
         user_id = None
+    if not user_id and not user_email:
+        user_email = "anonymous@suaps.local"  # simple fallback for now
     return store.ensure_user(user_id, user_email)
 
 # --------------------------------------------------------------------
@@ -91,7 +99,14 @@ class IngestBatch(BaseModel):
 # --------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    return {"ok": True, "auth_disabled": DISABLE_AUTH}
+
+# Handy for validation from GPT Actions
+@app.get("/whoami")
+def whoami(user_id: Optional[str] = None, user_email: Optional[str] = None, x_api_key: Optional[str] = Header(None)):
+    auth(x_api_key)
+    u = _resolve_user(user_id, user_email)
+    return {"authorized": True, "user": {"id": u["id"], "email": u.get("email")}}
 
 # --------------------------------------------------------------------
 # Chat
@@ -110,7 +125,7 @@ def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
             session_id=body.session_id,
             message=body.message,
             history=body.history,
-            temperature=body.temperature,  # may be None; pipeline decides default/omit
+            temperature=body.temperature,  # may be None
         )
         return {"session_id": session_id, "answer": answer}
     except HTTPException:
@@ -189,7 +204,7 @@ from vendors.supabase_client import supabase as _supabase
 @app.get("/debug/selftest")
 def selftest(x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
-    out = {"openai": None, "pinecone": None, "supabase": None}
+    out = {"openai": None, "pinecone": None, "supabase": None, "auth_disabled": DISABLE_AUTH}
 
     # OpenAI
     try:
