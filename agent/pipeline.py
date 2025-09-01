@@ -205,16 +205,19 @@ def chat(
         if mid:
             citations.append(str(mid))
 
-    draft: Dict[str, Any] = {
-        "answer": raw_answer,
-        "citations": citations,
-        "guidance_questions": [],           # can be populated by a follow-up LLM pass later
-        "autosave_candidates": [],          # add extraction pass later; app.py will handle autosave call safely
-        "metrics": {
-            "tokens": getattr(resp, "usage", None).total_tokens if getattr(resp, "usage", None) else None,
-            "latency_ms": int((time.time() - t0) * 1000),
-        },
-    }
+    autosave_candidates = _extract_autosave_candidates(raw_answer)
+
+draft: Dict[str, Any] = {
+    "answer": raw_answer,
+    "citations": citations,
+    "guidance_questions": [],
+    "autosave_candidates": autosave_candidates,
+    "metrics": {
+        "tokens": getattr(resp, "usage", None).total_tokens if getattr(resp, "usage", None) else None,
+        "latency_ms": int((time.time() - t0) * 1000),
+    },
+}
+
 
     # 7) Red-team reviewer (best-effort)
     try:
