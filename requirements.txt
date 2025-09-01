@@ -12,3 +12,5 @@ python-dotenv
 pypdf
 supabase>=2.4.0
 postgrest>=0.11.0
+python-docx
+simhash
