@@ -1,48 +1,77 @@
 # agent/pipeline.py
+import time
 import os
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
-from vendors.openai_client import client
-from agent import store
+from vendors.openai_client import client as openai_client, CHAT_MODEL
+from agent import store, retrieval
 
-# Try to import retrieval; if not present or missing functions, we will degrade gracefully.
+# ranking/packing helpers (we added these files earlier)
+from memory.selection import hybrid_rank, pack_to_budget, one_hop_graph
+
+# red-team (allow graceful fallback if not present)
 try:
-    from agent import retrieval  # type: ignore
+    from guardrails import redteam
 except Exception:
-    retrieval = None  # type: ignore
+    redteam = None  # type: ignore
+# extractor model can be smaller than main chat model
+EXTRACTOR_MODEL = os.getenv("OPENAI_EXTRACTOR_MODEL", CHAT_MODEL)
+
+def _extract_autosave_candidates(answer: str) -> list[dict]:
+    """
+    Call LLM to extract high-signal facts for autosave.
+    Output: list of {fact_type, title, text, tags, confidence}
+    """
+    try:
+        prompt = (
+            "Extract important decisions, deadlines, and procedures from the following text. "
+            "Return a JSON array where each item has: "
+            "fact_type (decision|deadline|procedure|entity), title, text, tags (array), confidence (0-1). "
+            f"\n\nText:\n{answer}"
+        )
+        resp = openai_client.chat.completions.create(
+            model=EXTRACTOR_MODEL,
+            messages=[{"role": "system", "content": "You are a JSON-only extractor."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        raw = resp.choices[0].message.content
+        import json
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as ex:
+        # fail gracefully
+        return []
 
 # --------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------
-CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-
-# Default chat temperature when the caller doesn't provide one
-DEFAULT_CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.5"))
-
-# If your upstream rejects the temperature parameter entirely, set to "false"
-CHAT_ALLOW_TEMPERATURE = os.getenv("CHAT_ALLOW_TEMPERATURE", "true").lower() == "true"
-
-# Token budget knobs (coarse; we do simple trimming by count of turns)
+DEFAULT_CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.2"))
 MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "8"))
 
-# Retrieval knobs
-K_EPISODIC = int(os.getenv("K_EPI", "3"))
-K_SEMANTIC = int(os.getenv("K_SEM", "5"))
-
 # --------------------------------------------------------------------
-# Helpers
+# Internal helpers
 # --------------------------------------------------------------------
 def _ensure_session(user_id: str, session_id: Optional[str]) -> str:
-    """
-    Return an existing session_id or create a new one via store.create_session(user_id).
-    If create_session isn't available, generate a simple ULID-like string.
-    """
+    """Return an existing session_id or create a new one using store.ensure_session/create_session."""
     if session_id:
         return session_id
-    # Prefer DB-backed session if the store provides it
+
+    # Prefer DB-backed
+    try:
+        if hasattr(store, "ensure_session"):
+            s = store.ensure_session(session_id, user_id)  # type: ignore
+            # expected to return {"id": "..."}:
+            if isinstance(s, dict) and "id" in s:
+                return s["id"]
+    except Exception:
+        pass
+
     try:
         if hasattr(store, "create_session"):
-            s = store.create_session(user_id)  # expected to return {"id": "..."} or similar
+            s = store.create_session(user_id)  # type: ignore
             if isinstance(s, dict) and "id" in s:
                 return s["id"]
             if isinstance(s, str):
@@ -50,7 +79,7 @@ def _ensure_session(user_id: str, session_id: Optional[str]) -> str:
     except Exception:
         pass
 
-    # Fallback: generate a simple session token
+    # Fallback: ephemeral
     try:
         import ulid
         return str(ulid.new())
@@ -59,126 +88,50 @@ def _ensure_session(user_id: str, session_id: Optional[str]) -> str:
         return f"sess_{uuid.uuid4()}"
 
 def _trim_history(history: List[Dict], limit: int = MAX_HISTORY_TURNS) -> List[Dict]:
-    """
-    Keep only the last N turns. History is expected as a list of {role, content}.
-    """
     if not history or limit <= 0:
         return []
     return history[-limit:]
 
-def _get_procedural_rules() -> str:
-    """
-    System prompt (procedural memory). Adjust as needed.
-    """
-    return (
-        "You are SUAPS Brain — the Society for UAP Studies' mentor and institutional memory. "
-        "Be concise, precise, and grounded in retrieved context. "
-        "If unsure, say so and suggest next steps. "
-        "When appropriate, ask one clarifying or guiding question that advances the user's goal. "
-        "Avoid hallucinations; cite retrieved snippets when you rely on them."
+def _save_message(session_id: str, role: str, content: str) -> None:
+    """Best-effort persistence; ignore if store lacks these helpers."""
+    try:
+        if hasattr(store, "insert_message"):
+            store.insert_message(session_id, role, content)  # type: ignore
+        elif hasattr(store, "log_message"):
+            store.log_message(session_id, role=role, content=content)  # type: ignore
+    except Exception:
+        pass
+
+def _llm_answer(message: str, context_blocks: List[Dict[str, Any]], temperature: Optional[float]) -> Any:
+    # Build prompt (simple & robust)
+    sys = (
+        "You are SUAPS Brain. Be concise and specific. "
+        "Ground answers in retrieved context if provided. "
+        "If evidence is weak or missing, say so and propose next steps."
     )
 
-def _fetch_context(user_id: str, query: str) -> List[Dict]:
-    """
-    Try multiple retrieval functions if available; return a list of dicts with
-    keys: {'type','title','content','score','tags'} (best-effort).
-    If retrieval is not configured or fails, return [].
-    """
-    results: List[Dict] = []
+    ctx_txt = ""
+    if context_blocks:
+        lines = []
+        for i, m in enumerate(context_blocks, 1):
+            title = (m.get("title") or "")[:120]
+            snippet = (m.get("text") or m.get("content") or "")[:1200]
+            mid = m.get("memory_id") or m.get("id") or ""
+            t = m.get("type") or m.get("__namespace") or ""
+            lines.append(f"[{i}] ({t}) {title}\n{snippet}\n(id:{mid})")
+        ctx_txt = "Retrieved context:\n\n" + "\n\n---\n\n".join(lines)
 
-    if retrieval is None:
-        return results
+    msgs = [{"role": "system", "content": sys}]
+    if ctx_txt:
+        msgs.append({"role": "system", "content": ctx_txt})
+    msgs.append({"role": "user", "content": message})
 
-    # We don't know the exact retrieval API in your repo;
-    # try several common patterns and soft-fail if missing.
-    try:
-        # Pattern A: a consolidated fetch_context
-        if hasattr(retrieval, "fetch_context"):
-            ctx = retrieval.fetch_context(user_id=user_id, query=query, k_ep=K_EPISODIC, k_sem=K_SEMANTIC)
-            if isinstance(ctx, list):
-                return ctx
-    except Exception:
-        pass
-
-    try:
-        # Pattern B: separate search functions
-        episodic_hits = []
-        semantic_hits = []
-
-        if hasattr(retrieval, "search_episodic"):
-            episodic_hits = retrieval.search_episodic(user_id=user_id, query=query, k=K_EPISODIC) or []
-        if hasattr(retrieval, "search_semantic"):
-            semantic_hits = retrieval.search_semantic(query=query, k=K_SEMANTIC) or []
-
-        # Normalize structure
-        def norm(hit, tlabel):
-            if isinstance(hit, dict):
-                return {
-                    "type": tlabel,
-                    "title": hit.get("title") or "",
-                    "content": hit.get("content") or hit.get("text") or "",
-                    "score": hit.get("score"),
-                    "tags": hit.get("tags") or [],
-                }
-            return {"type": tlabel, "title": "", "content": str(hit), "score": None, "tags": []}
-
-        results.extend([norm(h, "episodic") for h in episodic_hits])
-        results.extend([norm(h, "semantic") for h in semantic_hits])
-        return results
-    except Exception:
-        pass
-
-    return results
-
-def _assemble_messages(
-    procedural: str,
-    context_snippets: List[Dict],
-    history: List[Dict],
-    user_message: str,
-) -> List[Dict]:
-    """
-    Build OpenAI Chat API messages list.
-    """
-    msgs: List[Dict] = []
-    msgs.append({"role": "system", "content": procedural})
-
-    # Add retrieved context as one assistant message to keep the prompt compact
-    if context_snippets:
-        ctx_lines = []
-        for i, snip in enumerate(context_snippets, start=1):
-            title = snip.get("title") or ""
-            body = snip.get("content") or ""
-            ttype = snip.get("type") or ""
-            tags = snip.get("tags") or []
-            line = f"[{i}] ({ttype}) {title}\n{body}"
-            if tags:
-                line += f"\nTags: {', '.join([str(t) for t in tags])}"
-            ctx_lines.append(line)
-        ctx_block = "Retrieved context:\n\n" + "\n\n---\n\n".join(ctx_lines)
-        msgs.append({"role": "system", "content": ctx_block})
-
-    # Prior history
-    for turn in history:
-        r = turn.get("role")
-        c = turn.get("content")
-        if r in ("user", "assistant", "system") and isinstance(c, str):
-            msgs.append({"role": r, "content": c})
-
-    # Current user message
-    msgs.append({"role": "user", "content": user_message})
-    return msgs
-
-def _call_llm(messages: List[Dict], temperature: Optional[float]) -> str:
-    """
-    Call the provider. Add temperature only if allowed. Return text content.
-    """
-    kwargs = {"model": CHAT_MODEL, "messages": messages}
-    final_temp = DEFAULT_CHAT_TEMPERATURE if temperature is None else float(temperature)
-    if CHAT_ALLOW_TEMPERATURE:
-        kwargs["temperature"] = final_temp
-
-    resp = client.chat.completions.create(**kwargs)
-    return resp.choices[0].message.content or ""
+    resp = openai_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=msgs,
+        temperature=DEFAULT_CHAT_TEMPERATURE if temperature is None else float(temperature),
+    )
+    return resp
 
 # --------------------------------------------------------------------
 # Public API
@@ -189,35 +142,91 @@ def chat(
     message: str,
     history: List[Dict],
     temperature: Optional[float] = None,
-) -> Tuple[str, str]:
+) -> Tuple[str, Dict[str, Any]]:
     """
-    Main chat entrypoint used by app.py.
-    Returns: (session_id, answer)
+    Returns: (session_id, draft_dict)
+    draft_dict has:
+      answer: str
+      citations: List[str]
+      guidance_questions: List[str]
+      autosave_candidates: List[dict]
+      redteam: dict
+      metrics: dict
     """
+    t0 = time.time()
+
+    # 1) Ensure session and log user message
     sid = _ensure_session(user_id, session_id)
-    trimmed_history = _trim_history(history, MAX_HISTORY_TURNS)
+    _save_message(sid, "user", message)
 
-    # Gather context (best-effort; ok if empty)
-    ctx = _fetch_context(user_id=user_id, query=message)
-
-    # Build prompt
-    procedural = _get_procedural_rules()
-    messages = _assemble_messages(
-        procedural=procedural,
-        context_snippets=ctx,
-        history=trimmed_history,
-        user_message=message,
-    )
-
-    # LLM call
-    answer = _call_llm(messages, temperature=temperature)
-
-    # Optionally: log the turn to a messages table, if store provides it
+    # 2) Retrieval
+    # Use our unified per-type search that already exists in agent/retrieval.py
     try:
-        if hasattr(store, "log_message"):
-            store.log_message(sid, role="user", content=message)
-            store.log_message(sid, role="assistant", content=answer)
+        hits = retrieval.search_per_type(user_id, message)  # List[metadata dicts]
     except Exception:
-        pass
+        hits = []
 
-    return sid, answer
+    # 3) Graph expand (1-hop via entity mentions)
+    try:
+        expand = one_hop_graph(hits, db=store.supabase, limit=10)  # may return raw rows
+    except Exception:
+        expand = []
+
+    # Normalize raw rows to metadata-like dicts (best effort)
+    norm_expand = []
+    for r in expand:
+        if isinstance(r, dict):
+            d = dict(r)
+            if "id" in d and "memory_id" not in d:
+                d["memory_id"] = d["id"]
+            norm_expand.append(d)
+    candidates = hits + norm_expand
+
+    # 4) Hybrid rank + pack
+    try:
+        ranked = hybrid_rank(message, candidates, q_entities=set())
+    except Exception:
+        ranked = candidates
+
+    # Token budget packing (history is already a list of turns; we only pass ranked as context)
+    try:
+        context = pack_to_budget(history=[], ranked=ranked)
+    except Exception:
+        context = ranked
+
+    # 5) Primary LLM answer
+    resp = _llm_answer(message, context, temperature)
+    raw_answer = resp.choices[0].message.content if resp and resp.choices else ""
+
+    # 6) Build draft (PRD shape). We keep it simple: citations from top ranked memory_ids.
+    citations = []
+    for md in ranked[:3]:
+        mid = md.get("memory_id") or md.get("id")
+        if mid:
+            citations.append(str(mid))
+
+    draft: Dict[str, Any] = {
+        "answer": raw_answer,
+        "citations": citations,
+        "guidance_questions": [],           # can be populated by a follow-up LLM pass later
+        "autosave_candidates": [],          # add extraction pass later; app.py will handle autosave call safely
+        "metrics": {
+            "tokens": getattr(resp, "usage", None).total_tokens if getattr(resp, "usage", None) else None,
+            "latency_ms": int((time.time() - t0) * 1000),
+        },
+    }
+
+    # 7) Red-team reviewer (best-effort)
+    try:
+        if redteam is not None and hasattr(redteam, "review"):
+            verdict = redteam.review(message, raw_answer, ranked)
+        else:
+            verdict = {"action": "allow", "reasons": []}
+    except Exception as ex:
+        verdict = {"action": "allow", "error": str(ex)}
+    draft["redteam"] = verdict
+
+    # 8) Save assistant message (best-effort)
+    _save_message(sid, "assistant", draft["answer"])
+
+    return sid, draft
