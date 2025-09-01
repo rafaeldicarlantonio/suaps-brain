@@ -1,16 +1,16 @@
-fastapi
-uvicorn[standard]
-openai>=1.30.0
-pinecone           # HTTP (default)
-# or, for faster IO over gRPC:
-# pinecone[grpc]
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
 
-supabase
-python-ulid
-pydantic
-python-dotenv
-pypdf
+openai>=1.40.0
+pinecone-client>=5.0.0   # official Pinecone client
+
 supabase>=2.4.0
 postgrest>=0.11.0
+python-ulid
+pydantic>=2.5.0
+python-dotenv
+
+pypdf>=3.17.0
 python-docx>=1.1.0
 simhash>=2.1.2
+python-multipart>=0.0.9   # required for FastAPI UploadFile/Form
