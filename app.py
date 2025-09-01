@@ -11,9 +11,11 @@ from pydantic import BaseModel, Field, field_validator
 from agent import store, pipeline, retrieval
 from agent.ingest import distill_chunk
 from router.debug_selftest import router as debug_selftest_router
-app.include_router(debug_selftest_router)
+
+# NEW: autosave
 from memory.autosave import autosave_from_candidates
 
+app = FastAPI(title="SUAPS Agent API")
 
 # --------------------------------------------------------------------
 # Config
@@ -22,10 +24,13 @@ API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
 
-app = FastAPI(title="SUAPS Agent API")
+# Routers
+app.include_router(upload_router)
+app.include_router(debug_router)
+app.include_router(debug_selftest_router)
 
 # --------------------------------------------------------------------
-# Security (bypass when DISABLE_AUTH=true)
+# Security
 # --------------------------------------------------------------------
 def auth(x_api_key: Optional[str]):
     if DISABLE_AUTH:
@@ -45,14 +50,6 @@ def _is_uuid(s: Optional[str]) -> bool:
         return False
 
 def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
-    """
-    Normalize ANY input into a real UUID from `users`.
-    Priority:
-      1) user_email provided -> upsert/select by email
-      2) user_id is UUID     -> select by id
-      3) user_id not UUID    -> treat as email/alias
-      4) none provided       -> anonymous
-    """
     if not user_email and user_id and not _is_uuid(user_id):
         user_email = user_id
         user_id = None
@@ -64,7 +61,7 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
 # Models
 # --------------------------------------------------------------------
 class ChatInput(BaseModel):
-    user_id: Optional[str] = None        # read-only-ish; ignored for writes
+    user_id: Optional[str] = None
     user_email: Optional[str] = None
     session_id: Optional[str] = None
     message: str
@@ -83,7 +80,6 @@ class ChatInput(BaseModel):
         return max(0.0, min(1.2, v))
 
 class MemoryUpsert(BaseModel):
-    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
     user_id: Optional[str] = None
     user_email: Optional[str] = None
     type: str
@@ -93,11 +89,10 @@ class MemoryUpsert(BaseModel):
     tags: List[str] = []
 
 class IngestItem(BaseModel):
-    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
     user_id: Optional[str] = None
     user_email: Optional[str] = None
     text: str
-    type: str = "semantic"  # or "episodic"
+    type: str = "semantic"
     tags: List[str] = []
 
 class IngestBatch(BaseModel):
@@ -128,14 +123,26 @@ def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
         raise HTTPException(status_code=400, detail=f"user resolution error: {ex}")
 
     try:
-        session_id, answer = pipeline.chat(
+        session_id, draft = pipeline.chat(
             user_id=user_row["id"],
             session_id=body.session_id,
             message=body.message,
             history=body.history,
             temperature=body.temperature,
         )
-        return {"session_id": session_id, "answer": answer}
+
+        # --- AUTOSAVE ---
+        autosave_result = autosave_from_candidates(draft.get("autosave_candidates", []), session_id)
+
+        return {
+            "session_id": session_id,
+            "answer": draft.get("answer"),
+            "citations": draft.get("citations", []),
+            "guidance_questions": draft.get("guidance_questions", []),
+            "autosave": autosave_result,
+            "redteam": draft.get("redteam", {}),
+            "metrics": draft.get("metrics", {}),
+        }
     except HTTPException:
         raise
     except Exception as ex:
@@ -148,7 +155,6 @@ def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
 def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
     try:
-        # HARD STOP: ignore incoming user_id; always resolve to a UUID
         user_row = _resolve_user(None, body.user_email if body.user_email else body.user_id)
         uid = user_row["id"]
         row = store.upsert_memory(uid, body.type, body.title, body.content, body.importance, body.tags)
@@ -174,7 +180,6 @@ def ingest_batch(body: IngestBatch, x_api_key: Optional[str] = Header(None)):
     try:
         out: List[str] = []
         for it in body.items:
-            # HARD STOP: ignore incoming user_id; always resolve to a UUID
             email_or_alias = it.user_email if it.user_email else it.user_id
             user_row = _resolve_user(None, email_or_alias)
             uid = user_row["id"]
@@ -219,7 +224,7 @@ def selftest(x_api_key: Optional[str] = Header(None)):
         out["openai"] = {"ok": False, "error": str(ex)}
 
     try:
-        idx_name = os.getenv("PINECONE_INDEX", "memories")
+        idx_name = os.getenv("PINECONE_INDEX", "uap-kb")
         names = [i["name"] for i in _pc.list_indexes()]
         if idx_name not in names:
             out["pinecone"] = {"ok": False, "error": f"Index '{idx_name}' not found. Existing: {names}"}
