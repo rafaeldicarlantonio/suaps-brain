@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SUAPS Agent API (No-Auth Dev Mode)
-  version: "1.0.0"
+  version: "1.0.1"
 servers:
   - url: https://suaps-brain.onrender.com
 
@@ -27,11 +27,11 @@ paths:
       x-openai-isConsequential: false
       parameters:
         - in: query
-          name: user_id
-          schema: { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
-        - in: query
           name: user_email
           schema: { type: string, nullable: true }
+        - in: query
+          name: user_id
+          schema: { type: string, nullable: true, description: "Optional; non-UUID treated as alias" }
       responses:
         "200":
           description: Current resolved user (dev helper)
@@ -59,8 +59,9 @@ paths:
               type: object
               required: [message]
               properties:
-                user_id:     { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
                 user_email:  { type: string, nullable: true }
+                # user_id allowed for compatibility but not required and ignored for writes
+                user_id:     { type: string, nullable: true, description: "Optional; ignored for writes if non-UUID" }
                 session_id:  { type: string, nullable: true }
                 message:     { type: string }
                 temperature: { type: number, nullable: true, description: "0.0–1.2; optional" }
@@ -98,7 +99,7 @@ paths:
               type: object
               required: [type, content]
               properties:
-                user_id:    { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+                # REMOVE user_id from writes to prevent clients sending email into UUID field
                 user_email: { type: string, nullable: true }
                 type:
                   type: string
@@ -137,7 +138,7 @@ paths:
                     type: object
                     required: [text, type]
                     properties:
-                      user_id:    { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+                      # REMOVE user_id from writes
                       user_email: { type: string, nullable: true }
                       text:       { type: string }
                       type:
