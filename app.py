@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from agent import store, pipeline, retrieval
 from agent.ingest import distill_chunk
+from router.debug_selftest import router as debug_selftest_router
+app.include_router(debug_selftest_router)
 
 # --------------------------------------------------------------------
 # Config
