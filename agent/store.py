@@ -1,131 +1,76 @@
 # agent/store.py
+# PRD-aligned Supabase CRUD helpers for memories/entities/tool_runs
 from __future__ import annotations
-
-from typing import Optional, Dict, Any, List
+import json, time, hashlib
+from typing import Any, Dict, List, Optional, Tuple
 from vendors.supabase_client import supabase
 
-
-# ----------------------------
-# Users
-# ----------------------------
-def upsert_user(email: str) -> Dict[str, Any]:
-    """
-    Idempotently create (or fetch) a user by email.
-    Supabase-py v2: .upsert(...).execute(); then .select(...) to fetch.
-    """
-    supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
-    res = supabase.table("users").select("*").eq("email", email).limit(1).execute()
-    if not res.data:
-        raise RuntimeError("failed to upsert/select user by email")
-    return res.data[0]
-
-
-def ensure_user(user_id: Optional[str], user_email: Optional[str]) -> Dict[str, Any]:
-    """
-    Resolve a user by UUID or email (create-by-email if needed).
-    """
-    # UUID path
-    if user_id:
-        r = supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
-        if r.data:
-            return r.data[0]
-        # fall back to email creation if provided
-        if user_email:
-            return upsert_user(user_email)
-        raise ValueError("user_id not found and no user_email provided")
-
-    # Email path
-    if user_email:
-        return upsert_user(user_email)
-
-    # Fallback (dev): anonymous
-    return upsert_user("anonymous@suaps.local")
-
-
-# ----------------------------
-# Sessions
-# ----------------------------
-def create_session(user_id: str) -> Dict[str, Any]:
-    """
-    Create a session row for the user and return at least an id.
-
-    NOTE: In supabase-py v2 you cannot chain .select() after .insert().
-    """
-    ins = supabase.table("sessions").insert({"user_id": user_id}).execute()
-    # Many projects configure PostgREST to return the inserted row; if not, fetch it.
-    if ins.data and isinstance(ins.data, list) and ins.data:
-        row = ins.data[0]
-        # If server didn't include id, fallback to select
-        if "id" in row and row["id"]:
-            return {"id": row["id"]}
-    sel = (
-        supabase.table("sessions")
-        .select("id")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not sel.data:
-        raise RuntimeError("failed to create/select session")
-    return {"id": sel.data[0]["id"]}
-
-
-# ----------------------------
-# Memories
-# ----------------------------
-def upsert_memory(
-    user_id: str,
-    type_: str,
-    title: str,
-    content: str,
-    importance: int = 3,
-    tags: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """
-    Insert a memory row.
-
-    IMPORTANT: DB has NOT NULL on `value`. We write BOTH `content` and `value`.
-    Supabase v2: call .insert(...).execute(); don't chain .select().
-    """
-    payload = {
-        "user_id": user_id,
-        "type": type_,
-        "title": title or "",
-        "content": content,   # API field
-        "value": content,     # satisfy DB constraint
-        "importance": importance,
-        "tags": tags or [],
-    }
-
-    ins = supabase.table("memories").insert(payload).execute()
-    if ins.data and isinstance(ins.data, list) and ins.data:
-        row = ins.data[0]
-        if "id" in row and row["id"]:
-            return {"id": row["id"]}
-
-    # Fallback select by user + latest created (avoid strict content match if text is large)
-    sel = (
-        supabase.table("memories")
-        .select("id")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not sel.data:
-        raise RuntimeError("insert memory returned no row")
-    return {"id": sel.data[0]["id"]}
-
-
-# ----------------------------
-# Optional: message logging (used by pipeline)
-# ----------------------------
-def log_message(session_id: str, role: str, content: str) -> None:
+def _exec(q):
     try:
-        supabase.table("messages").insert(
-            {"session_id": session_id, "role": role, "content": content}
-        ).execute()
+        r = q.execute()
+        return r.data or []
+    except Exception as ex:
+        raise RuntimeError(f"Supabase error: {ex}")
+
+# ---- tool_runs (observability) ----
+def log_tool_run(name: str, input_json: Dict[str, Any], output_json: Dict[str, Any], success: bool, latency_ms: int) -> None:
+    row = dict(name=name, input_json=input_json, output_json=output_json, success=bool(success), latency_ms=int(latency_ms))
+    try:
+        _exec(supabase.table("tool_runs").insert(row))
     except Exception:
-        # Non-fatal
+        # best-effort logging
         pass
+
+# ---- memories ----
+def sha256_normalized(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def find_memory_by_dedupe_hash(dedupe_hash: str) -> Optional[Dict[str, Any]]:
+    rows = _exec(supabase.table("memories").select("*").eq("dedupe_hash", dedupe_hash).limit(1))
+    return rows[0] if rows else None
+
+def fetch_recent_memories_texts(limit: int = 500) -> List[Dict[str, Any]]:
+    rows = _exec(supabase.table("memories").select("id,text,content,created_at").order("created_at", desc=True).limit(limit))
+    # compat: prefer text over content
+    for r in rows:
+        r["text"] = r.get("text") or r.get("content") or ""
+    return rows
+
+def insert_memory(*, type: str, title: str, text: str, tags: List[str] | None = None,
+                  source: Optional[str] = None, file_id: Optional[str] = None,
+                  session_id: Optional[str] = None, author_user_id: Optional[str] = None,
+                  role_view: Optional[List[str]] = None, dedupe_hash: Optional[str] = None) -> str:
+    row = {
+        "type": type,
+        "title": title,
+        "text": text,
+        "content": text,  # backward compatibility
+        "tags": tags or [],
+        "source": source,
+        "file_id": file_id,
+        "session_id": session_id,
+        "author_user_id": author_user_id,
+        "role_view": role_view or None,
+        "dedupe_hash": dedupe_hash,
+    }
+    rows = _exec(supabase.table("memories").insert(row).select("id").limit(1))
+    return rows[0]["id"]
+
+def update_memory_embedding_id(memory_id: str, embedding_id: str) -> None:
+    _exec(supabase.table("memories").update({"embedding_id": embedding_id}).eq("id", memory_id))
+
+# ---- entities & graph ----
+def get_or_create_entity(name: str, type: str) -> str:
+    # try find
+    rows = _exec(supabase.table("entities").select("id").eq("name", name).eq("type", type).limit(1))
+    if rows:
+        return rows[0]["id"]
+    # create
+    rows = _exec(supabase.table("entities").insert({"name": name, "type": type}).select("id").limit(1))
+    return rows[0]["id"]
+
+def link_entity_to_memory(entity_id: str, memory_id: str, weight: float = 1.0) -> None:
+    _exec(supabase.table("entity_mentions").upsert({"entity_id": entity_id, "memory_id": memory_id, "weight": weight}))
+
+def add_entity_edge(src_id: str, dst_id: str, rel: str, weight: float = 1.0) -> None:
+    _exec(supabase.table("entity_edges").upsert({"src": src_id, "dst": dst_id, "rel": rel, "weight": weight}))
