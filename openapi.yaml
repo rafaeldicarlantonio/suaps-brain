@@ -1,13 +1,15 @@
 openapi: 3.1.0
 info:
-  title: SUAPS Agent API
+  title: SUAPS Agent API (No-Auth Dev Mode)
   version: "1.0.0"
 servers:
   - url: https://suaps-brain.onrender.com
+
 paths:
   /healthz:
     get:
       operationId: healthz
+      x-openai-isConsequential: false
       responses:
         "200":
           description: OK
@@ -16,32 +18,52 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok:
-                    type: boolean
+                  ok: { type: boolean }
+                  auth_disabled: { type: boolean }
+
+  /whoami:
+    get:
+      operationId: whoami
+      x-openai-isConsequential: false
+      parameters:
+        - in: query
+          name: user_id
+          schema: { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+        - in: query
+          name: user_email
+          schema: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Current resolved user (dev helper)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorized: { type: boolean }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      email: { type: string, nullable: true }
+
   /chat:
     post:
       operationId: chat
-      security:
-        - ApiKeyAuth: []
+      x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [message]   # user_id no longer required
+              required: [message]
               properties:
-                user_id:
-                  type: string
-                  nullable: true
-                user_email:
-                  type: string
-                  nullable: true
-                session_id:
-                  type: string
-                  nullable: true
-                message:
-                  type: string
+                user_id:     { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+                user_email:  { type: string, nullable: true }
+                session_id:  { type: string, nullable: true }
+                message:     { type: string }
+                temperature: { type: number, nullable: true, description: "0.0–1.2; optional" }
                 history:
                   type: array
                   items:
@@ -55,64 +77,52 @@ paths:
                         type: string
       responses:
         "200":
-          description: OK
+          description: Chat response
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  session_id:
-                    type: string
-                  answer:
-                    type: string
+                  session_id: { type: string }
+                  answer: { type: string }
+
   /memories/upsert:
     post:
       operationId: upsertMemory
-      security:
-        - ApiKeyAuth: []
+      x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [type, content]   # user_id no longer required
+              required: [type, content]
               properties:
-                user_id:
-                  type: string
-                  nullable: true
-                user_email:
-                  type: string
-                  nullable: true
+                user_id:    { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+                user_email: { type: string, nullable: true }
                 type:
                   type: string
                   enum: [episodic, semantic, procedural]
-                title:
-                  type: string
-                content:
-                  type: string
-                importance:
-                  type: integer
-                  default: 3
+                title:      { type: string, nullable: true }
+                content:    { type: string }
+                importance: { type: integer, default: 3 }
                 tags:
                   type: array
-                  items:
-                    type: string
+                  items: { type: string }
       responses:
         "200":
-          description: OK
+          description: Upserted memory id
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  id:
-                    type: string
+                  id: { type: string }
+
   /ingest/batch:
     post:
       operationId: ingestBatch
-      security:
-        - ApiKeyAuth: []
+      x-openai-isConsequential: false
       requestBody:
         required: true
         content:
@@ -125,39 +135,17 @@ paths:
                   type: array
                   items:
                     type: object
-                    required: [text, type]   # user_id no longer required
+                    required: [text, type]
                     properties:
-                      user_id:
-                        type: string
-                        nullable: true
-                      user_email:
-                        type: string
-                        nullable: true
-                      text:
-                        type: string
+                      user_id:    { type: string, nullable: true, description: "UUID or alias; non-UUID treated as email." }
+                      user_email: { type: string, nullable: true }
+                      text:       { type: string }
                       type:
                         type: string
                         enum: [semantic, episodic]
                       tags:
                         type: array
-                        items:
-                          type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  created_ids:
-                    type: array
-                    items:
-                      type: string
+                        items: { type: string }
+
 components:
   schemas: {}
-  securitySchemes:
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
