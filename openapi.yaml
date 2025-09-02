@@ -1,71 +1,17 @@
 openapi: 3.1.0
 info:
-  title: SUAPS Agent API (No-Auth Dev Mode)
-  version: "1.0.1"
+  title: SUAPS Brain API
+  version: "1.1"
+  description: FastAPI service for chat, upload, ingestion, memories, debug, and health.
 servers:
   - url: https://suaps-brain.onrender.com
-
+security:
+  - ApiKeyAuth: []
 paths:
-/upload:
-  post:
-    operationId: upload
-    requestBody:
-      required: true
-      content:
-        multipart/form-data:
-          schema:
-            type: object
-            properties:
-              file:
-                type: string
-                format: binary
-              tags:
-                type: string
-    responses:
-      "200":
-        description: Upload + ingest started
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                file_id: { type: string }
-                bytes: { type: integer }
-                mime_type: { type: string }
-                ingest_ids: { type: array, items: { type: string } }
-                latency_ms: { type: integer }
-/debug/memories:
-  get:
-    operationId: debugMemories
-    parameters:
-      - in: query
-        name: limit
-        schema: { type: integer, default: 20 }
-      - in: query
-        name: type
-        schema: { type: string, nullable: true }
-    responses:
-      "200":
-        description: Latest memories
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                items:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      id: { type: string }
-                      type: { type: string }
-                      title: { type: string }
-                      tags: { type: array, items: { type: string } }
-                      created_at: { type: string }
   /healthz:
     get:
       operationId: healthz
-      x-openai-isConsequential: false
+      summary: Liveness + dependency status
       responses:
         "200":
           description: OK
@@ -74,135 +20,359 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean }
-                  auth_disabled: { type: boolean }
-
-  /whoami:
-    get:
-      operationId: whoami
-      x-openai-isConsequential: false
-      parameters:
-        - in: query
-          name: user_email
-          schema: { type: string, nullable: true }
-        - in: query
-          name: user_id
-          schema: { type: string, nullable: true, description: "Optional; non-UUID treated as alias" }
-      responses:
-        "200":
-          description: Current resolved user (dev helper)
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  authorized: { type: boolean }
-                  user:
-                    type: object
-                    properties:
-                      id: { type: string }
-                      email: { type: string, nullable: true }
-
+                  status:
+                    type: string
+                  supabase:
+                    type: boolean
+                  pinecone:
+                    type: boolean
+                  openai:
+                    type: boolean
   /chat:
     post:
       operationId: chat
-      x-openai-isConsequential: false
+      summary: Chat with retrieval + red-team + autosave
+      security:
+        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [message]
+              required:
+                - message
               properties:
-                user_email:  { type: string, nullable: true }
-                # user_id allowed for compatibility but not required and ignored for writes
-                user_id:     { type: string, nullable: true, description: "Optional; ignored for writes if non-UUID" }
-                session_id:  { type: string, nullable: true }
-                message:     { type: string }
-                temperature: { type: number, nullable: true, description: "0.0–1.2; optional" }
+                user_email:
+                  type: string
+                role:
+                  type: string
+                  enum:
+                    - researcher
+                    - staff
+                    - director
+                    - admin
+                session_id:
+                  type: string
+                message:
+                  type: string
                 history:
                   type: array
                   items:
                     type: object
-                    required: [role, content]
-                    properties:
-                      role:
-                        type: string
-                        enum: [user, assistant, system]
-                      content:
-                        type: string
+                temperature:
+                  type: number
+                preferences:
+                  type: object
+                debug:
+                  type: boolean
+              $ref: "#/components/schemas/ChatRequest"
       responses:
         "200":
-          description: Chat response
+          description: PRD chat response
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  session_id: { type: string }
-                  answer: { type: string }
-
-  /memories/upsert:
+                $ref: "#/components/schemas/ChatResponse"
+        4XX:
+          description: Client error
+        5XX:
+          description: Server error
+  /upload:
     post:
-      operationId: upsertMemory
-      x-openai-isConsequential: false
+      operationId: upload
+      summary: File upload -> text -> ingest
+      security:
+        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
               type: object
-              required: [type, content]
               properties:
-                # REMOVE user_id from writes to prevent clients sending email into UUID field
-                user_email: { type: string, nullable: true }
-                type:
+                file:
                   type: string
-                  enum: [episodic, semantic, procedural]
-                title:      { type: string, nullable: true }
-                content:    { type: string }
-                importance: { type: integer, default: 3 }
+                  format: binary
                 tags:
-                  type: array
-                  items: { type: string }
+                  type: string
       responses:
         "200":
-          description: Upserted memory id
+          description: Upload + ingest result
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  id: { type: string }
-
+                  file_id:
+                    type: string
+                    nullable: true
+                  bytes:
+                    type: integer
+                  mime_type:
+                    type: string
+                    nullable: true
+                  ingest_ids:
+                    type: array
+                    items:
+                      type: string
+                  latency_ms:
+                    type: integer
   /ingest/batch:
     post:
       operationId: ingestBatch
-      x-openai-isConsequential: false
+      summary: Ingest multiple text items (semantic or episodic)
+      security:
+        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
+              $ref: "#/components/schemas/IngestBatchRequest"
               type: object
-              required: [items]
               properties:
                 items:
                   type: array
                   items:
                     type: object
-                    required: [text, type]
+                    required:
+                      - text
                     properties:
-                      # REMOVE user_id from writes
-                      user_email: { type: string, nullable: true }
-                      text:       { type: string }
+                      user_email:
+                        type: string
+                      text:
+                        type: string
                       type:
                         type: string
-                        enum: [semantic, episodic]
+                        enum:
+                          - semantic
+                          - episodic
                       tags:
                         type: array
-                        items: { type: string }
-
+                        items:
+                          type: string
+      responses:
+        "200":
+          description: Upsert summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  upserted:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        memory_id:
+                          type: string
+                        embedding_id:
+                          type: string
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        reason:
+                          type: string
+  /memories/upsert:
+    post:
+      operationId: memoriesUpsert
+      summary: Direct memory create/update
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryUpsert"
+      responses:
+        "200":
+          description: OK
+  /debug/memories:
+    get:
+      operationId: debugMemories
+      summary: List recent memories
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: type
+          schema:
+            type: string
+            nullable: true
+      responses:
+        "200":
+          description: Latest memories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        type:
+                          type: string
+                        title:
+                          type: string
+                          nullable: true
+                        tags:
+                          type: array
+                          items:
+                            type: string
+                        created_at:
+                          type: string
 components:
-  schemas: {}
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    ChatRequest:
+      type: object
+      properties:
+        prompt:
+          type: string
+          description: User message (alias 'message' also supported by server)
+        message:
+          type: string
+          description: Back-compat for server expecting 'message'
+        session_id:
+          type: string
+          nullable: true
+        role:
+          type: string
+          nullable: true
+          enum:
+            - researcher
+            - staff
+            - director
+            - admin
+        preferences:
+          type: object
+          additionalProperties: true
+        debug:
+          type: boolean
+          default: false
+      required:
+        - message
+    ChatResponse:
+      type: object
+      required:
+        - session_id
+        - answer
+        - citations
+        - guidance_questions
+        - autosave
+        - redteam
+        - metrics
+      properties:
+        session_id:
+          type: string
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            type: string
+        guidance_questions:
+          type: array
+          items:
+            type: string
+        autosave:
+          type: object
+          properties:
+            saved:
+              type: boolean
+            items:
+              type: array
+              items:
+                type: object
+        redteam:
+          type: object
+          additionalProperties: true
+        metrics:
+          type: object
+          properties:
+            tokens:
+              type: integer
+              nullable: true
+            latency_ms:
+              type: integer
+              nullable: true
+    IngestBatchRequest:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - text
+              - type
+            properties:
+              user_email:
+                type: string
+                nullable: true
+              text:
+                type: string
+              type:
+                type: string
+                enum:
+                  - semantic
+                  - episodic
+                  - procedural
+              title:
+                type: string
+                nullable: true
+              tags:
+                type: array
+                items:
+                  type: string
+              source:
+                type: string
+                nullable: true
+              role_view:
+                type: array
+                items:
+                  type: string
+    MemoryUpsert:
+      type: object
+      required:
+        - type
+        - text
+      properties:
+        type:
+          type: string
+          enum:
+            - semantic
+            - episodic
+            - procedural
+        title:
+          type: string
+          nullable: true
+        text:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        role_view:
+          type: array
+          items:
+            type: string
