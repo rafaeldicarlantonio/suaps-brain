@@ -1,29 +1,48 @@
-# app.py
 import os
 import uuid
 from typing import Optional, List, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
 
-# Routers
-from router.upload import router as upload_router
-from router.chat import router as chat_router      # you just added this
-from router.debug import router as debug_router    # if you have this
+# Optional project modules (fail-safe imports)
+try:
+    from agent import store, retrieval
+    from agent.ingest import distill_chunk
+except Exception:
+    store = None
+    retrieval = None
+    distill_chunk = None
 
+# Routers (comment out if a router is missing)
+try:
+    from router.upload import router as upload_router
+except Exception:
+    upload_router = None
+try:
+    from router.chat import router as chat_router
+except Exception:
+    chat_router = None
+try:
+    from router.debug import router as debug_router
+except Exception:
+    debug_router = None
+
+# Create the app ONCE
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
 
-# Register routers AFTER app is created
-app.include_router(upload_router)
-# app.include_router(ingest_router)   # uncomment if present
-app.include_router(chat_router)
-app.include_router(debug_router)    # uncomment if present
-# app.include_router(health_router)   # uncomment if present
+# Register routers AFTER app is created (only if they exist)
+if upload_router is not None:
+    app.include_router(upload_router)
+if chat_router is not None:
+    app.include_router(chat_router)
+if debug_router is not None:
+    app.include_router(debug_router)
 
 # Optional: avoid 404 on root
 @app.get("/")
 def root():
     return {"ok": True, "service": "suaps-brain"}
-
 
 # --------------------------------------------------------------------
 # Config
@@ -31,8 +50,6 @@ def root():
 API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
-
-app = FastAPI(title="SUAPS Agent API")
 
 # --------------------------------------------------------------------
 # Security (bypass when DISABLE_AUTH=true)
@@ -63,55 +80,14 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
       3) user_id not UUID    -> treat as email/alias
       4) none provided       -> anonymous
     """
+    if store is None:
+        raise HTTPException(status_code=500, detail="store module unavailable")
     if not user_email and user_id and not _is_uuid(user_id):
         user_email = user_id
         user_id = None
     if not user_id and not user_email:
         user_email = "anonymous@suaps.local"
     return store.ensure_user(user_id, user_email)
-
-# --------------------------------------------------------------------
-# Models
-# --------------------------------------------------------------------
-class ChatInput(BaseModel):
-    user_id: Optional[str] = None        # read-only-ish; ignored for writes
-    user_email: Optional[str] = None
-    session_id: Optional[str] = None
-    message: str
-    history: List[Dict] = []
-    temperature: Optional[float] = Field(None, description="0.0–1.2 (optional)")
-
-    @field_validator("temperature")
-    @classmethod
-    def clamp_temp(cls, v):
-        if v is None:
-            return None
-        try:
-            v = float(v)
-        except Exception:
-            return None
-        return max(0.0, min(1.2, v))
-
-class MemoryUpsert(BaseModel):
-    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
-    user_id: Optional[str] = None
-    user_email: Optional[str] = None
-    type: str
-    title: str = ""
-    content: str
-    importance: int = 3
-    tags: List[str] = []
-
-class IngestItem(BaseModel):
-    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
-    user_id: Optional[str] = None
-    user_email: Optional[str] = None
-    text: str
-    type: str = "semantic"  # or "episodic"
-    tags: List[str] = []
-
-class IngestBatch(BaseModel):
-    items: List[IngestItem]
 
 # --------------------------------------------------------------------
 # Health & Whoami
@@ -127,36 +103,23 @@ def whoami(user_id: Optional[str] = None, user_email: Optional[str] = None, x_ap
     return {"authorized": True, "user": {"id": u["id"], "email": u.get("email")}}
 
 # --------------------------------------------------------------------
-# Chat
-# --------------------------------------------------------------------
-@app.post("/chat")
-def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
-    auth(x_api_key)
-    try:
-        user_row = _resolve_user(body.user_id, body.user_email)
-    except Exception as ex:
-        raise HTTPException(status_code=400, detail=f"user resolution error: {ex}")
-
-    try:
-        session_id, answer = pipeline.chat(
-            user_id=user_row["id"],
-            session_id=body.session_id,
-            message=body.message,
-            history=body.history,
-            temperature=body.temperature,
-        )
-        return {"session_id": session_id, "answer": answer}
-    except HTTPException:
-        raise
-    except Exception as ex:
-        raise HTTPException(status_code=502, detail=f"chat pipeline error: {ex}")
-
-# --------------------------------------------------------------------
 # Memories Upsert
 # --------------------------------------------------------------------
+class MemoryUpsert(BaseModel):
+    # IMPORTANT: we will IGNORE user_id below and always use resolved UUID
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    type: str
+    title: str = ""
+    content: str
+    importance: int = 3
+    tags: List[str] = []
+
 @app.post("/memories/upsert")
 def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
+    if store is None or retrieval is None:
+        raise HTTPException(status_code=500, detail="store/retrieval modules unavailable")
     try:
         # HARD STOP: ignore incoming user_id; always resolve to a UUID
         user_row = _resolve_user(None, body.user_email if body.user_email else body.user_id)
@@ -165,22 +128,40 @@ def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None))
         retrieval.upsert_memory_vector(
             mem_id=row["id"],
             user_id=uid,
-            type_=body.type,
+            type=body.type,               # NOTE: kwarg is 'type', not 'type_'
             content=body.content,
             title=body.title,
             tags=body.tags,
             importance=body.importance,
+            created_at_iso=None,
+            source="chat",
+            role_view=None,
+            entity_ids=[],
         )
         return {"id": row["id"]}
+    except HTTPException:
+        raise
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Upsert memory error: {ex}")
 
 # --------------------------------------------------------------------
 # Ingest Batch
 # --------------------------------------------------------------------
+class IngestItem(BaseModel):
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None
+    text: str
+    type: str = "semantic"  # or "episodic"
+    tags: List[str] = []
+
+class IngestBatch(BaseModel):
+    items: List[IngestItem]
+
 @app.post("/ingest/batch")
 def ingest_batch(body: IngestBatch, x_api_key: Optional[str] = Header(None)):
     auth(x_api_key)
+    if store is None or retrieval is None:
+        raise HTTPException(status_code=500, detail="store/retrieval modules unavailable")
     try:
         out: List[str] = []
         for it in body.items:
@@ -192,30 +173,48 @@ def ingest_batch(body: IngestBatch, x_api_key: Optional[str] = Header(None)):
             if not t:
                 continue
             if it.type == "semantic":
+                if distill_chunk is None:
+                    raise HTTPException(status_code=500, detail="distill_chunk unavailable")
                 ids = distill_chunk(user_id=uid, raw_text=t, base_tags=it.tags or [], make_qa=True)
-                out.extend(ids)
+                out.extend(ids or [])
             else:
                 row = store.upsert_memory(uid, "episodic", "", t, 4, it.tags or [])
                 retrieval.upsert_memory_vector(
                     mem_id=row["id"],
                     user_id=uid,
-                    type_="episodic",
+                    type="episodic",       # NOTE: kwarg is 'type', not 'type_'
                     content=t,
                     title="",
                     tags=it.tags or [],
                     importance=4,
+                    created_at_iso=None,
+                    source="ingest",
+                    role_view=None,
+                    entity_ids=[],
                 )
                 out.append(row["id"])
         return {"created_ids": out}
+    except HTTPException:
+        raise
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Ingest error: {ex}")
+
 
 # --------------------------------------------------------------------
 # Debug / Selftest
 # --------------------------------------------------------------------
-from vendors.openai_client import client as _openai
-from vendors.pinecone_client import pc as _pc
-from vendors.supabase_client import supabase as _supabase
+try:
+    from vendors.openai_client import client as _openai
+except Exception:
+    _openai = None
+try:
+    from vendors.pinecone_client import pc as _pc
+except Exception:
+    _pc = None
+try:
+    from vendors.supabase_client import supabase as _supabase
+except Exception:
+    _supabase = None
 
 @app.get("/debug/selftest")
 def selftest(x_api_key: Optional[str] = Header(None)):
@@ -223,12 +222,16 @@ def selftest(x_api_key: Optional[str] = Header(None)):
     out = {"openai": None, "pinecone": None, "supabase": None, "auth_disabled": DISABLE_AUTH}
 
     try:
+        if _openai is None:
+            raise RuntimeError("openai client missing")
         e = _openai.embeddings.create(model=OPENAI_EMBED_MODEL, input="ping")
         out["openai"] = {"ok": True, "dim": len(e.data[0].embedding)}
     except Exception as ex:
         out["openai"] = {"ok": False, "error": str(ex)}
 
     try:
+        if _pc is None:
+            raise RuntimeError("pinecone client missing")
         idx_name = os.getenv("PINECONE_INDEX", "memories")
         names = [i["name"] for i in _pc.list_indexes()]
         if idx_name not in names:
@@ -239,6 +242,8 @@ def selftest(x_api_key: Optional[str] = Header(None)):
         out["pinecone"] = {"ok": False, "error": str(ex)}
 
     try:
+        if _supabase is None:
+            raise RuntimeError("supabase client missing")
         r = _supabase.table("memories").select("id").limit(1).execute()
         out["supabase"] = {"ok": True, "count": len(r.data or [])}
     except Exception as ex:
