@@ -47,7 +47,7 @@ def root():
 # --------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------
-API_KEY = os.getenv("ACTIONS_API_KEY") or "dev_key"
+API_KEY = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY") or "dev_key"
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
 
@@ -94,30 +94,31 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
 # --------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
-    out = {"status":"ok"}
+    """PRD §5.5: return explicit connectivity booleans."""
+    out = {"status": "ok", "openai": False, "pinecone": False, "supabase": False}
+    # OpenAI
     try:
-        # OpenAI
         from vendors.openai_client import client, EMBED_MODEL
         client.embeddings.create(model=EMBED_MODEL, input="ping")
-        out["openai"]=True
-    except Exception as ex:
-        out["openai"]=False; out["openai_error"]=str(ex)
-
+        out["openai"] = True
+    except Exception:
+        out["openai"] = False
+    # Pinecone
     try:
-        # Pinecone
         from vendors.pinecone_client import pc
-        idx = os.getenv("PINECONE_INDEX","uap-kb")
-        out["pinecone"]= idx in [i["name"] for i in pc.list_indexes()]
-    except Exception as ex:
-        out["pinecone"]=False; out["pinecone_error"]=str(ex)
-
+        idxs = pc.list_indexes()
+        out["pinecone"] = True if idxs is not None else False
+    except Exception:
+        out["pinecone"] = False
+    # Supabase
     try:
         from vendors.supabase_client import supabase
         supabase.table("memories").select("id").limit(1).execute()
-        out["supabase"]=True
-    except Exception as ex:
-        out["supabase"]=False; out["supabase_error"]=str(ex)
+        out["supabase"] = True
+    except Exception:
+        out["supabase"] = False
     return out
+
 
 @app.get("/whoami")
 def whoami(user_id: Optional[str] = None, user_email: Optional[str] = None, x_api_key: Optional[str] = Header(None)):
