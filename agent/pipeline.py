@@ -1,218 +1,232 @@
-# agent/pipeline.py
+"""
+agent/pipeline.py
+------------------
+Sane, import-safe pipeline module with enforced red-team step.
+Designed to compile cleanly and avoid "return outside function" and similar
+syntax issues. Minimal external assumptions; all optional imports are gated.
+
+Exports:
+  - chat(...): returns (session_id, response_dict)
+
+Note: This file is intentionally conservative so it doesn't break on import.
+Integrate deeper with your store/retrieval modules as needed.
+"""
+
+from __future__ import annotations
+
 import os
 import time
-import uuid
-from typing import List, Dict, Tuple, Optional, Any
+import math
+import json
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 
-from vendors.openai_client import client as openai_client, CHAT_MODEL
-from agent import store, retrieval
-from memory.selection import hybrid_rank, pack_to_budget, one_hop_graph
+logger = logging.getLogger(__name__)
+
+# -------- Optional / tolerant imports (do not fail on import) --------
+try:
+    # your project layout: vendors/openai_client.py should expose `client` and model constants
+    from vendors.openai_client import client as _oai_client
+except Exception:
+    _oai_client = None
 
 try:
-    from guardrails import redteam
+    from vendors.openai_client import CHAT_MODEL as _CHAT_MODEL
 except Exception:
-    redteam = None  # type: ignore
+    _CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4.1-mini")
 
-EXTRACTOR_MODEL = os.getenv("OPENAI_EXTRACTOR_MODEL", CHAT_MODEL)
-DEFAULT_CHAT_TEMPERATURE = float(os.getenv("CHAT_TEMPERATURE", "0.2"))
-MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "8"))
+# agent package peers (safe to import; they should not execute code at import-time)
+try:
+    from agent import retrieval as _retrieval
+except Exception:
+    _retrieval = None
 
-# -------------------------
-# Helpers
-# -------------------------
-def _ensure_session(user_id: str, session_id: Optional[str]) -> str:
-    if session_id:
-        return session_id
+try:
+    from agent import store as _store
+except Exception:
+    _store = None
+
+try:
+    from guardrails import redteam as _redteam_mod
+except Exception:
+    _redteam_mod = None
+
+MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "2000"))
+TOPK_PER_TYPE = int(os.getenv("TOPK_PER_TYPE", "30"))
+RECENCY_HALFLIFE_DAYS = float(os.getenv("RECENCY_HALFLIFE_DAYS", "90"))
+
+# ------------------ Small helpers ------------------
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+def _oai_chat(messages: List[Dict[str, str]], model: Optional[str] = None, temperature: float = 0.0) -> str:
+    """
+    Minimal wrapper to call OpenAI Chat Completions. If the vendors client
+    isn't available, returns a fallback string.
+    """
+    model = model or _CHAT_MODEL
+    if _oai_client is None:
+        return "(LLM unavailable) No OpenAI client configured."
+
     try:
-        if hasattr(store, "create_session"):
-            s = store.create_session(user_id)
-            if isinstance(s, dict) and "id" in s:
-                return s["id"]
-            if isinstance(s, str):
-                return s
-    except Exception:
-        pass
-    try:
-        import ulid
-        return str(ulid.new())
-    except Exception:
-        return f"sess_{uuid.uuid4()}"
-
-def _trim_history(history: List[Dict], limit: int = MAX_HISTORY_TURNS) -> List[Dict]:
-    if not history or limit <= 0:
-        return []
-    return history[-limit:]
-
-def _save_message(session_id: str, role: str, content: str) -> None:
-    try:
-        if hasattr(store, "insert_message"):
-            store.insert_message(session_id, role, content)
-        elif hasattr(store, "log_message"):
-            store.log_message(session_id, role=role, content=content)
-    except Exception:
-        pass
-
-def _get_procedural_rules() -> str:
-    return (
-        "You are SUAPS Brain — the Society for UAP Studies' mentor and institutional memory. "
-        "Be concise, precise, and grounded in retrieved context. "
-        "If unsure, say so and suggest next steps. "
-        "When appropriate, ask one clarifying or guiding question that advances the user's goal. "
-        "Avoid hallucinations; cite retrieved snippets when you rely on them."
-    )
-
-def _assemble_messages(procedural: str, context_blocks: List[Dict[str, Any]], history: List[Dict], user_message: str) -> List[Dict]:
-    msgs: List[Dict] = [{"role": "system", "content": procedural}]
-    if context_blocks:
-        lines = []
-        for i, m in enumerate(context_blocks, 1):
-            title = (m.get("title") or "")[:120]
-            snippet = (m.get("text") or m.get("content") or "")[:1200]
-            mid = m.get("memory_id") or m.get("id") or ""
-            t = m.get("type") or m.get("__namespace") or ""
-            lines.append(f"[{i}] ({t}) {title}\n{snippet}\n(id:{mid})")
-        ctx_txt = "Retrieved context:\n\n" + "\n\n---\n\n".join(lines)
-        msgs.append({"role": "system", "content": ctx_txt})
-    for turn in history:
-        r, c = turn.get("role"), turn.get("content")
-        if r in ("user","assistant","system") and isinstance(c, str):
-            msgs.append({"role": r, "content": c})
-    msgs.append({"role": "user", "content": user_message})
-    return msgs
-
-def _llm_answer(messages: List[Dict], temperature: Optional[float]) -> Any:
-    kwargs = {"model": _MODEL, "messages": messages}
-    final_temp = DEFAULT__TEMPERATURE if temperature is None else float(temperature)
-    if os.getenv("_ALLOW_TEMPERATURE", "true").lower() == "true":
-        kwargs["temperature"] = final_temp
-    return openai_client..completions.create(**kwargs)
-
-def _extract_autosave_candidates(answer: str) -> list[dict]:
-    try:
-        prompt = (
-            "Extract important decisions, deadlines, and procedures from the following text. "
-            "Return a JSON array where each item has: "
-            "fact_type (decision|deadline|procedure|entity), title, text, tags (array), confidence (0-1). "
-            f"\n\nText:\n{answer}"
+        resp = _oai_client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            messages=messages,
         )
-        resp = openai_client..completions.create(
-            model=EXTRACTOR_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a JSON-only extractor."},
-                {"role": "user", "content": prompt},
+        # OpenAI v1-style
+        return resp.choices[0].message.content.strip()
+    except Exception as ex:
+        logger.exception("OpenAI chat call failed: %s", ex)
+        return f"(LLM error) {ex}"
+
+def _enforce_redteam(raw_answer: str, citations: List[Dict[str, Any]], prompt: str, retrieved_chunks: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    """
+    Call red-team reviewer and enforce allow/revise/block. Returns (answer, verdict).
+    """
+    verdict = {"action": "allow", "reasons": []}
+    if _redteam_mod is None or not hasattr(_redteam_mod, "review"):
+        return raw_answer, verdict
+
+    try:
+        vt = _redteam_mod.review(
+            draft={"answer": raw_answer, "citations": citations},
+            prompt=prompt,
+            retrieved_chunks=retrieved_chunks,
+        )
+        if isinstance(vt, dict):
+            verdict = vt
+    except Exception as ex:
+        verdict = {"action": "allow", "reasons": [f"review_error:{ex}"]}
+        return raw_answer, verdict
+
+    action = verdict.get("action", "allow")
+    if action == "block":
+        safe = (
+            "I can’t answer confidently with the available evidence. "
+            "Try narrowing by date or tag, or upload the source."
+        )
+        return safe, verdict
+    if action == "revise":
+        edits = "\n".join(verdict.get("required_edits", [])[:6])
+        revised = _oai_chat(
+            [
+                {"role": "system", "content": "Revise the answer strictly per edits. No new claims."},
+                {"role": "user", "content": f"Original:\n{raw_answer}\n\nEdits:\n{edits}"},
             ],
+            model=_CHAT_MODEL,
             temperature=0.0,
         )
-        raw = resp.choices[0].message.content
-        import json
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+        return revised, verdict
 
-# -------------------------
-# Public API
-# -------------------------
+    return raw_answer, verdict
+
+# ------------------ Main entry ------------------
 def chat(
-    user_id: str,
-    session_id: Optional[str],
-    message: str,
-    history: List[Dict],
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    role: Optional[str] = None,
+    session_id: Optional[str] = None,
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
     temperature: Optional[float] = None,
+    debug: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
-    t0 = time.time()
-    sid = _ensure_session(user_id, session_id)
-    trimmed_history = _trim_history(history, MAX_HISTORY_TURNS)
+    """Primary chat orchestration used by the router.
+    Returns (session_id, response_dict).
+    """
+    t0 = _now_ms()
+    history = history or []
+    temperature = 0.0 if temperature is None else float(temperature)
 
-    # Retrieval
+    # 1) Ensure session id (best-effort; if store unavailable, synthesize one)
+    sid = session_id
+    if sid is None:
+        if _store is not None and hasattr(_store, "get_or_create_session"):
+            try:
+                sid = _store.get_or_create_session(user_id=user_id, user_email=user_email)
+            except Exception as ex:
+                logger.warning("get_or_create_session failed: %s", ex)
+                sid = str(uuid.uuid4())
+        else:
+            sid = str(uuid.uuid4())
+
+    # 2) Retrieve candidates (optional; tolerate missing module)
+    retrieved: List[Dict[str, Any]] = []
     try:
-        hits = retrieval.search_per_type(user_id, message)
-    except Exception:
-        hits = []
+        if _retrieval is not None and hasattr(_retrieval, "retrieve"):
+            retrieved = _retrieval.retrieve(
+                query=message,
+                role=role,
+                session_id=sid,
+                top_k=TOPK_PER_TYPE,
+            ) or []
+    except Exception as ex:
+        logger.warning("retrieval failed: %s", ex)
+        retrieved = []
 
-    # Graph expand
+    # 3) Build simple context and citations
+    def _mk_citation(item: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "memory_id": item.get("id") or item.get("memory_id"),
+            "title": item.get("title") or item.get("source_title") or "memory",
+            "type": item.get("type") or "semantic",
+        }
+
+    citations = [_mk_citation(x) for x in retrieved[:3]]
+
+    # Pack context (very simple; project can replace with token-aware packer)
+    context_parts: List[str] = []
+    for h in history[-4:]:
+        role_h = h.get("role", "user")
+        content_h = h.get("content", "")
+        context_parts.append(f"{role_h.upper()}: {content_h}")
+    for x in retrieved[:8]:
+        txt = x.get("text") or x.get("summary") or ""
+        ttl = x.get("title") or "memory"
+        context_parts.append(f"[{ttl}]\n{txt}")
+    context_blob = "\n\n".join(context_parts).strip()
+
+    # 4) Ask the LLM
+    system = "You are SUAPS Brain. Be concise and specific. Ground answers in SUAPS data when provided."
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"{message}\n\nContext:\n{context_blob}"},
+    ]
+    raw_answer = _oai_chat(messages, model=_CHAT_MODEL, temperature=temperature)
+
+    # 5) Red-team (enforce)
+    raw_answer, verdict = _enforce_redteam(raw_answer, citations, message, retrieved)
+
+    # 6) Guidance questions (seed 1–2)
+    guidance_questions = [
+        "Does this align with the current publication deliverables?",
+        "Should we capture a checklist as procedural memory?",
+    ][:2]
+
+    # 7) Autosave stub (leave decisions to autosave module if present)
+    autosave = {"saved": False, "items": []}
+
+    # 8) Metrics
+    latency_ms = _now_ms() - t0
+    metrics = {"latency_ms": latency_ms}
+
+    # 9) Persist messages (best-effort)
     try:
-        expand = one_hop_graph(hits, db=store.supabase, limit=10)
-    except Exception:
-        expand = []
+        if _store is not None and hasattr(_store, "save_message"):
+            _store.save_message(session_id=sid, role="user", content=message)
+            _store.save_message(session_id=sid, role="assistant", content=raw_answer)
+    except Exception as ex:
+        logger.warning("saving messages failed: %s", ex)
 
-    norm_expand = []
-    for r in expand:
-        if isinstance(r, dict):
-            d = dict(r)
-            if "id" in d and "memory_id" not in d:
-                d["memory_id"] = d["id"]
-            norm_expand.append(d)
-    candidates = hits + norm_expand
-
-    # Rank + pack
-    try:
-        ranked = hybrid_rank(message, candidates, q_entities=set())
-    except Exception:
-        ranked = candidates
-
-    try:
-        context = pack_to_budget(history=[], ranked=ranked)
-    except Exception:
-        context = ranked
-
-    # LLM
-    resp = _llm_answer(_assemble_messages(_get_procedural_rules(), context, trimmed_history, message), temperature)
-    raw_answer = resp.choices[0].message.content if resp and resp.choices else ""
-
-    # Draft
-    citations = [str(md.get("memory_id") or md.get("id")) for md in ranked[:3] if md.get("memory_id") or md.get("id")]
-    autosave_candidates = _extract_autosave_candidates(raw_answer)
-
-    draft: Dict[str, Any] = {
+    # 10) Build response
+    response = {
+        "session_id": sid,
         "answer": raw_answer,
         "citations": citations,
-        "guidance_questions": [],
-        "autosave_candidates": autosave_candidates,
-        "metrics": {
-            "tokens": getattr(resp, "usage", None).total_tokens if getattr(resp, "usage", None) else None,
-            "latency_ms": int((time.time() - t0) * 1000),
-        },
+        "guidance_questions": guidance_questions,
+        "autosave": autosave,
+        "redteam": verdict,
+        "metrics": metrics,
     }
-# --- Red-team (enforce) ---
-verdict = {"action": "allow", "reasons": []}
-
-try:
-    if redteam and hasattr(redteam, "review"):
-        verdict = redteam.review(
-            draft={"answer": raw_answer, "citations": citations},
-            prompt=message,
-            retrieved_chunks=ranked,
-        ) or {"action": "allow", "reasons": []}
-except Exception as ex:
-    verdict = {"action": "allow", "reasons": [f"review_error:{ex}"]}
-
-# expose verdict in your response/draft if you keep that object
-draft["redteam"] = verdict
-
-if verdict["action"] == "block":
-    raw_answer = (
-        "I can’t answer confidently with the available evidence. "
-        "Try narrowing by date or tag, or upload the source."
-    )
-elif verdict["action"] == "revise":
-    edit_instructions = "\n".join(verdict.get("required_edits", [])[:6])
-    try:
-        revised = openai_client.chat.completions.create(
-            model=CHAT_MODEL,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": "Revise the answer strictly per edits. No new claims."},
-                {"role": "user", "content": f"Original:\n{raw_answer}\n\nEdits:\n{edit_instructions}"},
-            ],
-        )
-        raw_answer = revised.choices[0].message.content.strip()
-    except Exception as ex:
-        verdict["reasons"].append(f"revise_error:{ex}")
-# --- end red-team (enforce) ---
-
-   
-    # Save assistant turn
-    _save_message(sid, "assistant", draft["answer"])
-
-    return sid, draft
+    return sid, response
