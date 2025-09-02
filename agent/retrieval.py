@@ -6,6 +6,27 @@ import os, math
 TOPK_PER_TYPE = int(os.getenv("TOPK_PER_TYPE", "30"))
 RECENCY_HALFLIFE_DAYS = int(os.getenv("RECENCY_HALFLIFE_DAYS", "90"))
 
+def _role_filter(role: Optional[str]) -> dict:
+    if not role:
+        return {}
+    # allow docs that are public (role_view empty) OR contain the role
+    return {"$or": [{"role_view": {"$eq": []}}, {"role_view": {"$contains": role}}]}
+
+def build_metadata_filter(*, role: Optional[str], tags_any: Optional[List[str]] = None, extra: Optional[Dict[str, Any]] = None) -> dict:
+    conds: List[dict] = [{"deleted": False}]
+    if tags_any:
+        tags = [t for t in tags_any if isinstance(t, str)]
+        if tags:
+            conds.append({"tags": {"$in": tags}})
+    rf = _role_filter(role)
+    if rf:
+        conds.append(rf)
+    if extra:
+        conds.append(extra)
+    if len(conds) == 1:
+        return conds[0]
+    return {"$and": conds}
+
 def embed(text: str):
     text = text[:8000]
     return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
