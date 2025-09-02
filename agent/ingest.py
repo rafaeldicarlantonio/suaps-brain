@@ -1,182 +1,135 @@
 """
-agent/ingest.py
-----------------
-PRD §6 ingestion improvements:
-- clean_text(): normalize to UTF-8, collapse whitespace, strip headers/footers/page numbers
-- chunk_text(): target ~800–1200 tokens, 100–150 overlap; prefer headings then paragraphs then sentences
-- distill_chunk(): LLM pass to produce {title, summary, tags[]} (+ candidate entities when available)
-- dedupe: exact (sha256 on normalized text) and near-dup via 64-bit SimHash (threshold >= 0.92)
-- store + embed + upsert to Pinecone (via agent.retrieval.upsert_memory_vector)
-- hooks for entities & graph (best-effort if agent.entities exists)
+agent/ingest.py  — self-contained ingestion that ALWAYS persists.
+
+Pipeline (PRD §6):
+- clean_text  -> normalize
+- chunk_text  -> ~1000 token chunks
+- distill_chunk -> title/summary/tags (tolerant)
+- dedupe -> exact sha256 + 64-bit SimHash near-dup
+- INSERT row in Supabase -> memories
+- EMBED with OpenAI -> Pinecone upsert (namespace = type)
+- UPDATE memories.embedding_id = "mem_<id>"
 """
 
 from __future__ import annotations
 
-import os
-import re
-import json
-import hashlib
-import logging
+import os, re, json, hashlib, logging
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Optional deps
-# ---------------------------------------------------------------------
-try:
-    from vendors.openai_client import client as _oai_client
-    CHAT_MODEL = os.getenv("EXTRACTOR_MODEL", os.getenv("CHAT_MODEL", "gpt-4.1-mini"))
-except Exception:
-    _oai_client = None
-    CHAT_MODEL = "gpt-4.1-mini"
+# ---------- Vendors (required) ----------
+from vendors.openai_client import client as _oai_client, EMBED_MODEL, CHAT_MODEL  # env must have OPENAI_API_KEY
+from vendors.supabase_client import supabase                                       # must be configured
+from pinecone import Index                                                         # pinecone v5; needs PINECONE_API_KEY
 
-try:
-    from agent import store
-except Exception:
-    store = None
-
-try:
-    from agent import retrieval
-except Exception:
-    retrieval = None
-
+# ---------- Optional project modules (if present) ----------
 try:
     from agent import entities as _entities
 except Exception:
     _entities = None
 
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
-TARGET_TOKENS = 1000  # aim 800–1200
-OVERLAP_TOKENS = 120  # 100–150
+# ---------- Config ----------
+PINECONE_INDEX = os.getenv("PINECONE_INDEX", "uap-kb")
+TARGET_TOKENS = 1000
+OVERLAP_TOKENS = 120
 NEAR_DUP_SIMHASH_BITS = 64
-NEAR_DUP_THRESHOLD = 0.92  # PRD: ≥ 0.92 -> considered duplicate
+NEAR_DUP_THRESHOLD = 0.92
 MAX_TAGS = 8
 
-def _approx_tokens(s: str) -> int:
-    return max(1, int(len(s or "")/4))
 
-# ---------------------------------------------------------------------
-# Normalization
-# ---------------------------------------------------------------------
-_HEADER_FOOTER_RE = re.compile(r'^(page \d+|\d+)$', re.IGNORECASE)
-_MULTISPACE_RE = re.compile(r'[ \t\u00A0\x0b\x0c]+')
-_MULTINEWLINE_RE = re.compile(r'\n{3,}')
+# ============ Utilities ============
+def _approx_tokens(s: str) -> int:
+    return max(1, int(len(s or "") / 4))
+
+_HEADER_FOOTER_RE = re.compile(r"^(page \d+|\d+)$", re.IGNORECASE)
+_MULTISPACE_RE    = re.compile(r"[ \t\u00A0\x0b\x0c]+")
+_MULTINEWLINE_RE  = re.compile(r"\n{3,}")
 
 def clean_text(text: str) -> str:
     if not text:
         return ""
-    # unify newlines
-    t = text.replace('\r\n', '\n').replace('\r', '\n')
-    # drop lines that look like headers/footers/page numbers
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = []
-    for ln in t.split('\n'):
+    for ln in t.split("\n"):
         s = ln.strip()
         if not s:
-            lines.append('')
+            lines.append("")
             continue
         if _HEADER_FOOTER_RE.match(s.lower()):
             continue
         lines.append(ln)
-    t = '\n'.join(lines)
-    # collapse spaces
-    t = _MULTISPACE_RE.sub(' ', t)
-    # collapse multiple blank lines
-    t = _MULTINEWLINE_RE.sub('\n\n', t)
-    # strip BOM / zero-width
-    t = t.replace('\ufeff', '').replace('\u200b', '')
+    t = "\n".join(lines)
+    t = _MULTISPACE_RE.sub(" ", t)
+    t = _MULTINEWLINE_RE.sub("\n\n", t)
+    t = t.replace("\ufeff", "").replace("\u200b", "")
     return t.strip()
 
-# ---------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------
-_HEADING_RE = re.compile(r'^(#{1,6}\s+.+|\s*[A-Z][A-Z0-9 \-]{6,}\s*)$')  # markdown or SCREAMING headings
-_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9(])')
+_HEADING_RE   = re.compile(r"^(#{1,6}\s+.+|\s*[A-Z][A-Z0-9 \-]{6,}\s*)$")
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(])")
 
 def _split_headings(text: str) -> List[Tuple[str, str]]:
-    """
-    Returns list of (heading, section_text). Heading may be '' for preface.
-    """
-    lines = text.split('\n')
+    lines = text.split("\n")
     chunks: List[Tuple[str, List[str]]] = []
-    cur_head = ''
+    cur_head = ""
     cur_buf: List[str] = []
     for ln in lines:
         if _HEADING_RE.match(ln.strip()):
-            # flush previous
             if cur_buf:
-                chunks.append((cur_head, cur_buf))
-                cur_buf = []
-            cur_head = ln.strip('# ').strip()
+                chunks.append((cur_head, cur_buf)); cur_buf = []
+            cur_head = ln.strip("# ").strip()
         else:
             cur_buf.append(ln)
     if cur_buf:
         chunks.append((cur_head, cur_buf))
-    return [(h, '\n'.join(buf).strip()) for h, buf in chunks]
+    return [(h, "\n".join(buf).strip()) for h, buf in chunks]
 
 def _split_paragraphs(section_text: str) -> List[str]:
-    parts = [p.strip() for p in re.split(r'\n\s*\n+', section_text) if p.strip()]
-    return parts
+    return [p.strip() for p in re.split(r"\n\s*\n+", section_text) if p.strip()]
 
 def _split_sentences(paragraph: str) -> List[str]:
     return _SENT_SPLIT_RE.split(paragraph.strip()) if paragraph.strip() else []
 
 def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: int = OVERLAP_TOKENS) -> List[Dict[str, Any]]:
-    """
-    Returns list of chunk dicts: {text, heading, start_token, end_token, approx_tokens}
-    Prefers boundaries: heading > paragraphs > sentences with overlap.
-    """
     sections = _split_headings(text)
     chunks: List[Dict[str, Any]] = []
 
     for heading, sec in sections:
         paragraphs = _split_paragraphs(sec)
-        buf: List[str] = []
-        buf_tokens = 0
-        start_tok = 0
+        buf: List[str] = []; buf_tokens = 0; start_tok = 0
 
         def _flush():
             nonlocal buf, buf_tokens, start_tok
             if not buf:
                 return
-            txt = '\n'.join(buf).strip()
+            txt = "\n".join(buf).strip()
             if not txt:
                 buf, buf_tokens = [], 0
                 return
             end_tok = start_tok + _approx_tokens(txt)
-            chunks.append({
-                "text": txt, "heading": heading, "start_token": start_tok,
-                "end_token": end_tok, "approx_tokens": _approx_tokens(txt)
-            })
-            # overlap
+            chunks.append({"text": txt, "heading": heading, "start_token": start_tok,
+                           "end_token": end_tok, "approx_tokens": _approx_tokens(txt)})
             if overlap_tokens > 0:
-                tail = txt[-overlap_tokens*4:]
-                buf = [tail]
-                buf_tokens = _approx_tokens(tail)
-                start_tok = end_tok - buf_tokens
+                tail = txt[-overlap_tokens*4:]; buf = [tail]
+                buf_tokens = _approx_tokens(tail); start_tok = end_tok - buf_tokens
             else:
-                buf, buf_tokens = [], 0
-                start_tok = end_tok
+                buf, buf_tokens = [], 0; start_tok = end_tok
 
         for para in paragraphs:
-            sents = _split_sentences(para)
-            for s in sents:
+            for s in _split_sentences(para):
                 tok = _approx_tokens(s)
                 if buf_tokens + tok > target_tokens:
                     _flush()
-                buf.append(s)
-                buf_tokens += tok
+                buf.append(s); buf_tokens += tok
             if buf_tokens >= target_tokens * 0.9:
                 _flush()
+        _flush()
 
-        _flush()  # flush remainder
-
-    # coarse rebalancing: merge tiny trailing chunks into previous
+    # merge tiny trailers
     merged: List[Dict[str, Any]] = []
     for c in chunks:
-        if merged and c["approx_tokens"] < min(200, int(0.25*target_tokens)):
+        if merged and c["approx_tokens"] < min(200, int(0.25 * target_tokens)):
             merged[-1]["text"] = (merged[-1]["text"].rstrip() + "\n\n" + c["text"].lstrip()).strip()
             merged[-1]["approx_tokens"] = _approx_tokens(merged[-1]["text"])
             merged[-1]["end_token"] = merged[-1]["start_token"] + merged[-1]["approx_tokens"]
@@ -184,47 +137,29 @@ def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: in
             merged.append(c)
     return merged
 
-# ---------------------------------------------------------------------
-# Distillation (summary/tags)
-# ---------------------------------------------------------------------
+
+# ============ Distill (tolerant) ============
 def distill_chunk(
     text: Optional[str] = None,
     title: Optional[str] = None,
     tags: Optional[List[str]] = None,
-    **kwargs,            # accept extras like user_id, session_id, etc.
+    **kwargs,
 ):
-    """
-    Returns {title, summary, tags}
-    Tolerant: if 'text' wasn't passed, we attempt to recover; never raises.
-    """
-    # try to recover text if caller used a different key
+    # recover alt keys
     if text is None:
         text = kwargs.get("chunk_text") or kwargs.get("content") or kwargs.get("body")
-
-    # if we still don't have text, return a safe fallback (do NOT raise)
     if not text:
-        return {
-            "title": title or "Untitled",
-            "summary": "",
-            "tags": (tags or [])[:MAX_TAGS],
-        }
+        return {"title": title or "Untitled", "summary": "", "tags": (tags or [])[:MAX_TAGS]}
 
-    # no OpenAI client? fall back to heuristic
+    # heuristic if needed
     if _oai_client is None:
-        first_line = text.strip().split('\n', 1)[0][:120]
-        import re as _re
-        words = _re.findall(r'[A-Za-z][A-Za-z0-9\-]{3,}', text.lower())
-        freq = {}
-        for w in words:
-            freq[w] = freq.get(w, 0) + 1
+        first = text.strip().split("\n", 1)[0][:120]
+        words = re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", text.lower())
+        freq = {}; [freq.setdefault(w, 0) for _ in words]
+        for w in words: freq[w] = freq.get(w, 0) + 1
         ht = [w for w,_ in sorted(freq.items(), key=lambda t: (-t[1], t[0]))[:5]]
-        return {
-            "title": title or first_line,
-            "summary": text[:500],
-            "tags": (ht or (tags or []))[:MAX_TAGS],
-        }
+        return {"title": title or first, "summary": text[:500], "tags": (ht or (tags or []))[:MAX_TAGS]}
 
-    # LLM path
     prompt = (
         "Summarize the following chunk for a knowledge base.\n"
         "Return JSON with keys: title, summary, tags (<=8 short tags).\n"
@@ -233,48 +168,39 @@ def distill_chunk(
     try:
         resp = _oai_client.chat.completions.create(
             model=CHAT_MODEL, temperature=0.2,
-            response_format={"type":"json_object"},
-            messages=[{"role":"user","content": prompt}]
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
         )
-        import json as _json
-        js = _json.loads(resp.choices[0].message.content)
+        js = json.loads(resp.choices[0].message.content)
         return {
-            "title": js.get("title") or title or (text.strip().split('\n',1)[0][:120] if text else "Untitled"),
-            "summary": js.get("summary") or (text[:500] if text else ""),
+            "title": js.get("title") or title or text.strip().split("\n", 1)[0][:120],
+            "summary": js.get("summary") or text[:500],
             "tags": (js.get("tags") or tags or [])[:MAX_TAGS],
         }
     except Exception:
-        # robust fallback if LLM fails
-        first_line = text.strip().split('\n', 1)[0][:120] if text else (title or "Untitled")
-        return {"title": title or first_line, "summary": (text[:500] if text else ""), "tags": (tags or [])[:MAX_TAGS]}
+        first = text.strip().split("\n", 1)[0][:120]
+        return {"title": title or first, "summary": text[:500], "tags": (tags or [])[:MAX_TAGS]}
 
 
-# ---------------------------------------------------------------------
-# Dedupe helpers (exact + simhash)
-# ---------------------------------------------------------------------
+# ============ Dedupe ============
 def _normalize_for_hash(s: str) -> str:
-    s = s.lower().strip()
-    s = re.sub(r'\s+', ' ', s)
-    return s
+    return re.sub(r"\s+", " ", (s or "").lower().strip())
 
 def compute_dedupe_hash(s: str) -> str:
-    return hashlib.sha256(_normalize_for_hash(s).encode('utf-8')).hexdigest()
+    return hashlib.sha256(_normalize_for_hash(s).encode("utf-8")).hexdigest()
 
 def _tokenize_for_simhash(s: str) -> List[str]:
-    import re as _re
-    return _re.findall(r'[a-z0-9]{3,}', _normalize_for_hash(s))
+    return re.findall(r"[a-z0-9]{3,}", _normalize_for_hash(s))
 
 def simhash64(s: str) -> int:
-    import hashlib as _hashlib
     tokens = _tokenize_for_simhash(s)
     if not tokens:
         return 0
-    v = [0]*NEAR_DUP_SIMHASH_BITS
+    v = [0] * NEAR_DUP_SIMHASH_BITS
     for tok in tokens:
-        h = int(_hashlib.md5(tok.encode('utf-8')).hexdigest(), 16)
+        h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16)
         for i in range(NEAR_DUP_SIMHASH_BITS):
-            bit = (h >> i) & 1
-            v[i] += 1 if bit else -1
+            v[i] += 1 if ((h >> i) & 1) else -1
     out = 0
     for i, val in enumerate(v):
         if val >= 0:
@@ -285,154 +211,153 @@ def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 def is_near_duplicate(sim_a: int, sim_b: int) -> bool:
-    # threshold 0.92 -> max distance <= floor(64*(1-0.92)) = 5
-    max_dist = max(0, int(NEAR_DUP_SIMHASH_BITS * (1.0 - NEAR_DUP_THRESHOLD)))
-    return hamming(sim_a, sim_b) <= max_dist
+    max_dist = max(0, int(NEAR_DUP_SIMHASH_BITS * (1.0 - NEAR_DUP_THRESHOLD)))  # 64*(1-0.92)=5
+    return hamming(sim_a, b=sim_b) <= max_dist
 
-# ---------------------------------------------------------------------
-# Ingest core
-# ---------------------------------------------------------------------
-def ingest_text(*, title: Optional[str], text: str, type: str, tags: Optional[List[str]] = None,
-                source: Optional[str] = None, role_view: Optional[List[str]] = None,
-                file_id: Optional[str] = None, session_id: Optional[str] = None,
-                dedupe: bool = True) -> Dict[str, Any]:
-    """
-    Ingest normalized text:
-    - chunk
-    - distill each chunk
-    - dedupe exact + near-dup (within-batch; exact dedupe also DB-level if store supports)
-    - upsert memory rows + vectors
-    """
-    assert type in ("episodic","semantic","procedural"), "invalid type"
+
+# ============ Core ingest ============
+def _embed_vec(text: str) -> List[float]:
+    r = _oai_client.embeddings.create(model=EMBED_MODEL, input=text)
+    return r.data[0].embedding
+
+def _pinecone_index() -> Index:
+    return Index(PINECONE_INDEX)
+
+def _upsert_vector(mem_id: str, vec: List[float], namespace: str, meta: Dict[str, Any]) -> None:
+    idx = _pinecone_index()
+    idx.upsert(
+        vectors=[{"id": f"mem_{mem_id}", "values": vec, "metadata": meta}],
+        namespace=namespace,
+    )
+
+def ingest_text(
+    *,
+    title: Optional[str],
+    text: str,
+    type: str,
+    tags: Optional[List[str]] = None,
+    source: Optional[str] = None,
+    role_view: Optional[List[str]] = None,
+    file_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    dedupe: bool = True,
+) -> Dict[str, Any]:
+    assert type in ("episodic", "semantic", "procedural"), "invalid type"
     norm = clean_text(text)
     chunks = chunk_text(norm)
 
     batch_simhashes: List[int] = []
     upserted: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
+    skipped:  List[Dict[str, Any]] = []
 
     for ch in chunks:
         ctext = ch["text"].strip()
         if not ctext:
             continue
 
-        # exact dedupe via sha256
+        # exact dedupe (DB-level)
         dh = compute_dedupe_hash(ctext)
-        if dedupe and store is not None:
+        if dedupe:
             try:
-                exists = False
-                if hasattr(store, "memory_exists_by_hash"):
-                    exists = bool(store.memory_exists_by_hash(dh))
-                elif hasattr(store, "find_memory_by_hash"):
-                    exists = bool(store.find_memory_by_hash(dh))
-                elif hasattr(store, "get_memory_by_hash"):
-                    exists = bool(store.get_memory_by_hash(dh))
-                if exists:
-                    skipped.append({"reason":"duplicate","dedupe_hash": dh})
+                q = supabase.table("memories").select("id").eq("dedupe_hash", dh).limit(1).execute()
+                if q.data:
+                    skipped.append({"reason": "duplicate", "dedupe_hash": dh})
                     continue
             except Exception as ex:
-                logger.warning("dedupe hash check failed: %s", ex)
+                logger.warning("dedupe check failed: %s", ex)
 
-        # near-dup within batch using SimHash
+        # in-batch near-dup
         sh = simhash64(ctext)
-        if dedupe and batch_simhashes:
-            if any(is_near_duplicate(sh, prev) for prev in batch_simhashes):
-                skipped.append({"reason":"near-duplicate","simhash": sh})
-                continue
+        if dedupe and any(is_near_duplicate(sh, prev) for prev in batch_simhashes):
+            skipped.append({"reason": "near-duplicate"})
+            continue
         batch_simhashes.append(sh)
 
-        # distill (must pass text explicitly)
-        try:
-            meta = distill_chunk(text=ctext, title=title, tags=tags or [])
-        except TypeError as ex:
-            # make this error visible to the client instead of a proxy 502
-            raise
-        except Exception as ex:
-            logger.warning("distill_chunk failed, falling back: %s", ex)
-            meta = {"title": title or ctext[:80], "summary": ctext[:500], "tags": tags or []}
-
+        # distill
+        meta = distill_chunk(text=ctext, title=title, tags=tags or [])
         ctitle = meta.get("title") or (title or "Untitled")
-        ctags = list(set((tags or []) + (meta.get("tags") or [])))[:MAX_TAGS]
+        ctags  = list(dict.fromkeys((tags or []) + (meta.get("tags") or [])))[:MAX_TAGS]
 
-        # insert memory row
+        # INSERT memory row
         try:
-            if store is None:
-                mem_row = {"id": f"tmp_{len(upserted)+1}", "type": type}
-            else:
-                if hasattr(store, "upsert_memory"):
-                    mem_row = store.upsert_memory(
-                        type=type, title=ctitle, text=ctext, tags=ctags,
-                        source=source or "ingest", file_id=file_id, session_id=session_id,
-                        role_view=role_view or [], dedupe_hash=dh
-                    )
-                elif hasattr(store, "insert_memory"):
-                    mem_row = store.insert_memory(
-                        type=type, title=ctitle, text=ctext, tags=ctags,
-                        source=source or "ingest", file_id=file_id, session_id=session_id,
-                        role_view=role_view or [], dedupe_hash=dh
-                    )
-                else:
-                    raise RuntimeError("store.upsert_memory/insert_memory not available")
+            ins = supabase.table("memories").insert({
+                "type": type,
+                "title": ctitle,
+                "text": ctext,
+                "tags": ctags,
+                "source": source or "ingest",
+                "file_id": file_id,
+                "session_id": session_id,
+                "role_view": role_view or [],
+                "dedupe_hash": dh,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+            mem_id = ins.data[0]["id"]
         except Exception as ex:
-            logger.error("Failed to insert memory row: %s", ex)
-            skipped.append({"reason":"store-failed","error": str(ex)})
+            logger.error("Supabase insert failed: %s", ex)
+            skipped.append({"reason": "store-failed", "error": str(ex)})
             continue
 
-        mem_id = mem_row["id"]
-
-        # entities & mentions (best-effort)
-        ents: List[str] = []
+        # (optional) entities
+        entity_ids: List[str] = []
         if _entities and hasattr(_entities, "extract_entities"):
             try:
                 ents = _entities.extract_entities(ctext) or []
-                # tolerate different return shapes
-                if ents and not isinstance(ents[0], (str,)):
-                    # if tuples/dicts returned, try to keep just ids/names
-                    ents = [e[0] if isinstance(e, (list, tuple)) else (e.get("id") or e.get("name"))
-                            for e in ents if e]
-                    ents = [e for e in ents if isinstance(e, str)]
+                # If returns list of names/ids tuples/dicts—normalize to strings
+                cleaned = []
+                for e in ents:
+                    if isinstance(e, str):
+                        cleaned.append(e)
+                    elif isinstance(e, (list, tuple)) and e:
+                        cleaned.append(str(e[0]))
+                    elif isinstance(e, dict):
+                        cleaned.append(e.get("id") or e.get("name"))
+                entity_ids = [x for x in cleaned if x]
             except Exception as ex:
-                logger.warning("entity extraction failed: %s", ex)
+                logger.warning("entities failed: %s", ex)
 
-        # embedding + upsert vector
+        # EMBED + UPSERT vector
         try:
-            if retrieval and hasattr(retrieval, "upsert_memory_vector"):
-                retrieval.upsert_memory_vector(
-                    mem_id=mem_id, user_id=None, type=type, content=ctext,
-                    title=ctitle, tags=ctags, importance=4,
-                    created_at_iso=None, source=source or "ingest",
-                    role_view=role_view or [], entity_ids=ents or []
-                )
-            if store and hasattr(store, "update_memory_embedding_id"):
-                try:
-                    store.update_memory_embedding_id(mem_id, f"mem_{mem_id}")
-                except Exception:
-                    pass
+            vec = _embed_vec(ctext)
+            meta_vec = {
+                "type": type,
+                "title": ctitle,
+                "tags": ctags,
+                "created_at": datetime.utcnow().isoformat(),
+                "role_view": role_view or [],
+                "entity_ids": entity_ids,
+                "source": source or "ingest",
+            }
+            _upsert_vector(mem_id, vec, namespace=type, meta=meta_vec)
+            # update embedding_id for reverse lookup
+            try:
+                supabase.table("memories").update({"embedding_id": f"mem_{mem_id}"}).eq("id", mem_id).execute()
+            except Exception:
+                pass
         except Exception as ex:
-            logger.error("vector upsert failed: %s", ex)
-            skipped.append({"reason":"vector-failed","error": str(ex)})
+            logger.error("Upsert vector failed: %s", ex)
+            skipped.append({"reason": "vector-failed", "error": str(ex)})
             continue
 
         upserted.append({"memory_id": mem_id, "embedding_id": f"mem_{mem_id}"})
 
     return {"upserted": upserted, "skipped": skipped}
 
-# ---------------------------------------------------------------------
-# Convenience API matching /ingest/batch body (PRD §5.3)
+
 def ingest_batch(items: List[Dict[str, Any]], dedupe: bool = True) -> Dict[str, Any]:
     all_up: List[Dict[str, Any]] = []
     all_sk: List[Dict[str, Any]] = []
     for it in items:
         res = ingest_text(
-            title = it.get("title"),
-            text = it.get("text") or "",
-            type = it.get("type") or "semantic",
-            tags = it.get("tags") or [],
-            source = it.get("source") or "ingest",
-            role_view = it.get("role_view") or [],
-            file_id = it.get("file_id"),
+            title      = it.get("title"),
+            text       = it.get("text") or "",
+            type       = it.get("type") or "semantic",
+            tags       = it.get("tags") or [],
+            source     = it.get("source") or "ingest",
+            role_view  = it.get("role_view") or [],
+            file_id    = it.get("file_id"),
             session_id = it.get("session_id"),
-            dedupe = dedupe if it.get("dedupe", None) is None else bool(it["dedupe"]),
+            dedupe     = dedupe if it.get("dedupe", None) is None else bool(it["dedupe"]),
         )
         all_up.extend(res.get("upserted", []))
         all_sk.extend(res.get("skipped", []))
