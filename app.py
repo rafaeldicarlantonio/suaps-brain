@@ -4,27 +4,21 @@ from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from router.ingest_batch import router as ingest_router
-# Routers
-# - ingest router is a MODULE exposing `router = APIRouter()`
-# - upload/chat/debug import the APIRouter object directly as `router`
-try:
-    from router.ingest_batch import router as ingest_router  # module
-except Exception:
-    ingest_router = None
 
+# ✅ Import the APIRouter object directly
+from router.ingest_batch import router as ingest_router
+
+# Optional routers (still safe to guard)
 try:
-    from router.upload import router as upload_router  # APIRouter
+    from router.upload import router as upload_router
 except Exception:
     upload_router = None
-
 try:
-    from router.chat import router as chat_router      # APIRouter
+    from router.chat import router as chat_router
 except Exception:
     chat_router = None
-
 try:
-    from router.debug import router as debug_router    # APIRouter
+    from router.debug import router as debug_router
 except Exception:
     debug_router = None
 
@@ -37,26 +31,23 @@ except Exception:
     retrieval = None
     distill_chunk = None
 
-# Create the app ONCE
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
+
+# Handy route list to verify mounts
 @app.get("/debug/routes")
 def list_routes():
-    # returns every registered route path; use in a browser to confirm your routes
     return {"routes": [r.path for r in app.routes]}
 
-# --- Include routers (fixes previous NameError: use app.include_router) ---
-if ingest_router is not None and hasattr(ingest_router, "router"):
-    # This provides POST /ingest/batch via router/ingest_batch.py
-    app.include_router(ingest_router)
+# ✅ Mount routers unconditionally for ingest; guarded for the optional ones
+app.include_router(ingest_router)        # <-- exposes POST /ingest/batch
 
 if upload_router is not None:
     app.include_router(upload_router)
-
 if chat_router is not None:
     app.include_router(chat_router)
-
 if debug_router is not None:
     app.include_router(debug_router)
+
 
 # Optional: avoid 404 on root
 @app.get("/")
