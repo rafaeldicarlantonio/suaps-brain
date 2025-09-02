@@ -9,7 +9,7 @@ from pydantic import BaseModel
 # - ingest router is a MODULE exposing `router = APIRouter()`
 # - upload/chat/debug import the APIRouter object directly as `router`
 try:
-    from router import ingest_batch as ingest_router  # module
+    from router.ingest_batch import router as ingest_router  # module
 except Exception:
     ingest_router = None
 
@@ -43,7 +43,7 @@ app = FastAPI(title="SUAPS Brain API", version="1.0.0")
 # --- Include routers (fixes previous NameError: use app.include_router) ---
 if ingest_router is not None and hasattr(ingest_router, "router"):
     # This provides POST /ingest/batch via router/ingest_batch.py
-    app.include_router(ingest_router.router)
+    app.include_router(ingest_router)
 
 if upload_router is not None:
     app.include_router(upload_router)
