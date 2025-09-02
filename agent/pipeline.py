@@ -184,6 +184,38 @@ def chat(
     except Exception as ex:
         verdict = {"action": "allow", "error": str(ex)}
     draft["redteam"] = verdict
+# After building `raw_answer`, before saving assistant:
+verdict = {"action": "allow", "reasons": []}
+try:
+    if redteam and hasattr(redteam, "review"):
+        verdict = redteam.review(
+            draft={ "answer": raw_answer, "citations": citations },
+            prompt=message, 
+            retrieved_chunks=ranked
+        )
+except Exception as ex:
+    verdict = {"action":"allow","reasons":[f"reviewer_error:{ex}"]}
+
+if verdict.get("action") == "block":
+    raw_answer = "I can’t answer confidently with the available evidence. Try narrowing by date or tag, or upload the source."
+elif verdict.get("action") == "revise":
+    # One constrained regeneration pass
+    edit_instructions = "\n".join(verdict.get("required_edits", [])[:6])
+    resp = openai_client.chat.completions.create(
+        model=CHAT_MODEL, temperature=0,
+        messages=[
+            {"role":"system","content":"Revise the answer strictly per edits. No new claims."},
+            {"role":"user","content":f"Original answer:\n{raw_answer}\n\nEdits:\n{edit_instructions}"}
+        ]
+    )
+    raw_answer = resp.choices[0].message.content.strip()
+
+# Optional: seed 1–2 mentor questions
+if not guidance_questions:
+    guidance_questions = [
+        "Does this align with the current publication deliverables?",
+        "Should we promote a checklist to procedural memory?"
+    ][:2]
 
     # Save assistant turn
     _save_message(sid, "assistant", draft["answer"])
