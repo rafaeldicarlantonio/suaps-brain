@@ -161,6 +161,7 @@ def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None))
             role_view=None,
             entity_ids=[],
         )
+        store.update_memory_embedding_id(row["id"], f"mem_{row['id']}")
         return {"id": row["id"]}
     except HTTPException:
         raise
