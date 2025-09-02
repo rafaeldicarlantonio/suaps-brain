@@ -191,50 +191,63 @@ def distill_chunk(
     text: Optional[str] = None,
     title: Optional[str] = None,
     tags: Optional[List[str]] = None,
-    **kwargs,            # accept extras like user_id, session_id
+    **kwargs,            # accept extras like user_id, session_id, etc.
 ):
     """
     Returns {title, summary, tags}
-    - Be tolerant to callers: if 'text' wasn't passed as keyword, try common alternates.
+    Tolerant: if 'text' wasn't passed, we attempt to recover; never raises.
     """
-    # --- safety guard: ensure we have text even if caller forgot/renamed it ---
+    # try to recover text if caller used a different key
     if text is None:
         text = kwargs.get("chunk_text") or kwargs.get("content") or kwargs.get("body")
-    if not text:
-        raise TypeError("distill_chunk(): 'text' is required")
-    # --------------------------------------------------------------------------
 
+    # if we still don't have text, return a safe fallback (do NOT raise)
+    if not text:
+        return {
+            "title": title or "Untitled",
+            "summary": "",
+            "tags": (tags or [])[:MAX_TAGS],
+        }
+
+    # no OpenAI client? fall back to heuristic
     if _oai_client is None:
-        # fallback heuristic
         first_line = text.strip().split('\n', 1)[0][:120]
         import re as _re
         words = _re.findall(r'[A-Za-z][A-Za-z0-9\-]{3,}', text.lower())
         freq = {}
         for w in words:
             freq[w] = freq.get(w, 0) + 1
-        tags = [w for w,_ in sorted(freq.items(), key=lambda t: (-t[1], t[0]))[:5]]
-        return {"title": title or first_line, "summary": text[:500], "tags": (tags or [])[:MAX_TAGS]}
+        ht = [w for w,_ in sorted(freq.items(), key=lambda t: (-t[1], t[0]))[:5]]
+        return {
+            "title": title or first_line,
+            "summary": text[:500],
+            "tags": (ht or (tags or []))[:MAX_TAGS],
+        }
 
+    # LLM path
     prompt = (
         "Summarize the following chunk for a knowledge base.\n"
         "Return JSON with keys: title, summary, tags (<=8 short tags).\n"
         "Text:\n---\n" + text[:8000] + "\n---"
     )
-    resp = _oai_client.chat.completions.create(
-        model=CHAT_MODEL, temperature=0.2,
-        response_format={"type":"json_object"},
-        messages=[{"role":"user","content": prompt}]
-    )
     try:
-        js = json.loads(resp.choices[0].message.content)
+        resp = _oai_client.chat.completions.create(
+            model=CHAT_MODEL, temperature=0.2,
+            response_format={"type":"json_object"},
+            messages=[{"role":"user","content": prompt}]
+        )
+        import json as _json
+        js = _json.loads(resp.choices[0].message.content)
         return {
-            "title": js.get("title") or title,
-            "summary": js.get("summary") or text[:500],
-            "tags": (js.get("tags") or [])[:MAX_TAGS],
+            "title": js.get("title") or title or (text.strip().split('\n',1)[0][:120] if text else "Untitled"),
+            "summary": js.get("summary") or (text[:500] if text else ""),
+            "tags": (js.get("tags") or tags or [])[:MAX_TAGS],
         }
     except Exception:
-        first = text.strip().split('\n', 1)[0][:120]
-        return {"title": title or first, "summary": text[:500], "tags": []}
+        # robust fallback if LLM fails
+        first_line = text.strip().split('\n', 1)[0][:120] if text else (title or "Untitled")
+        return {"title": title or first_line, "summary": (text[:500] if text else ""), "tags": (tags or [])[:MAX_TAGS]}
+
 
 # ---------------------------------------------------------------------
 # Dedupe helpers (exact + simhash)
