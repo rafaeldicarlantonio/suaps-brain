@@ -124,3 +124,54 @@ def log_tool_run(name: str, input_json, output_json, success: bool, latency_ms: 
     except Exception:
         # never crash the main flow due to logging
         pass
+# === Added for PRD §6.6 and §7.4 ===
+
+def ensure_entity(name: str, type_: str) -> str:
+    """Create or return an entity by (name,type)."""
+    try:
+        r = supabase.table("entities").select("id").eq("name", name).eq("type", type_).limit(1).execute()
+        if r.data:
+            return r.data[0]["id"]
+        ins = supabase.table("entities").insert({"name": name, "type": type_}).execute()
+        return ins.data[0]["id"]
+    except Exception as ex:
+        raise
+
+def insert_entity_mention(entity_id: str, memory_id: str, weight: float = 1.0) -> None:
+    try:
+        supabase.table("entity_mentions").upsert(
+            {"entity_id": entity_id, "memory_id": memory_id, "weight": float(weight)},
+            on_conflict="entity_id,memory_id"
+        ).execute()
+    except Exception:
+        pass
+
+def upsert_entity_edge(src: str, dst: str, rel: str, weight: float = 1.0) -> None:
+    try:
+        supabase.table("entity_edges").upsert(
+            {"src": src, "dst": dst, "rel": rel, "weight": float(weight)},
+            on_conflict="src,dst,rel"
+        ).execute()
+    except Exception:
+        pass
+
+def get_memory_entity_ids(memory_id: str) -> list[str]:
+    try:
+        r = supabase.table("entity_mentions").select("entity_id").eq("memory_id", memory_id).limit(100).execute()
+        return [row["entity_id"] for row in (r.data or [])]
+    except Exception:
+        return []
+
+def memories_by_entity_overlap(entity_ids: list[str], limit: int = 10) -> list[dict]:
+    """Return memories that mention ANY of the given entities (distinct), newest first."""
+    if not entity_ids:
+        return []
+    try:
+        r = supabase.table("entity_mentions").select("memory_id").in_("entity_id", entity_ids).limit(limit * 5).execute()
+        mids = list({row["memory_id"] for row in (r.data or [])})
+        if not mids:
+            return []
+        mems = supabase.table("memories").select("*").in_("id", mids).order("created_at", desc=True).limit(limit).execute()
+        return mems.data or []
+    except Exception:
+        return []
