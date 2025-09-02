@@ -40,7 +40,13 @@ def search_per_type(user_id: str | None, query: str, types=None, top_k:int = TOP
     types = types or ["episodic","semantic","procedural"]
     results = []
     flt = {"deleted": False}
-    if user_id: flt["user_id"] = str(user_id)
+if user_id: flt["user_id"] = str(user_id)
+if role:
+    flt["$or"] = [
+        {"role_view": {"$eq": []}},
+        {"role_view": {"$contains": role}}
+    ]
+
     for t in types:
         res = INDEX.query(vector=vec, top_k=top_k, include_metadata=True, filter=flt, namespace=t)
         for m in (res.matches or []):
