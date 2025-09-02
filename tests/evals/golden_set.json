@@ -1,0 +1,10 @@
+[
+  {
+    "id": "zephyr_decision_001",
+    "prompt": "What did we decide in the Zephyr meeting on Aug 14?",
+    "must_include": ["consolidate the Zephyr datasets"],
+    "must_cite_tags_any": ["Zephyr", "meeting"],
+    "max_latency_ms": 3000,
+    "role": "researcher"
+  }
+]
