@@ -14,9 +14,9 @@ def _extract_api_key(req: Request) -> str | None:
     return req.query_params.get("x_api_key")
 
 def _require_api_key(req: Request):
-    expected = os.getenv("X_API_KEY")
+    expected = os.getenv("ACTIONS_API_KEY")
     if not expected:
-        return
+        return  # dev mode: allow if not configured
     got = _extract_api_key(req)
     if got != expected:
         raise HTTPException(status_code=401, detail="invalid api key")
