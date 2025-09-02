@@ -381,23 +381,28 @@ def ingest_text(
     return {"upserted": upserted, "skipped": skipped}
 
 
-def ingest_batch(items: List[Dict[str, Any]], dedupe: bool = True) -> Dict[str, Any]:
-    all_up: List[Dict[str, Any]] = []
-    all_sk: List[Dict[str, Any]] = []
-    for it in items:
-                res = ingest_text(
-            title      = it.get("title"),
-            text       = it.get("text") or "",
-            type       = it.get("type") or "semantic",
-            tags       = it.get("tags") or [],
-            source     = it.get("source") or "ingest",
-            role_view  = it.get("role_view") or [],
-            file_id    = it.get("file_id"),
-            session_id = it.get("session_id"),
-            user_email = it.get("user_email"),     # <-- NEW: will default to DEFAULT_INGEST_USER if None
-            dedupe     = dedupe if it.get("dedupe", None) is None else bool(it["dedupe"]),
-        )
+def ingest_batch(items: list[dict], dedupe: bool = True) -> dict:
+    all_up: list = []
+    skipped: list = []
 
-        all_up.extend(res.get("upserted", []))
-        all_sk.extend(res.get("skipped", []))
-    return {"upserted": all_up, "skipped": all_sk}
+    for it in items:
+        try:
+            res = ingest_text(
+                title=it.get("title"),
+                text=it.get("text") or "",
+                type=it.get("type") or "semantic",
+                tags=it.get("tags") or [],
+                source=it.get("source") or "ingest",
+                role_view=it.get("role_view") or [],
+                file_id=it.get("file_id"),
+                session_id=it.get("session_id"),
+                user_email=it.get("user_email"),
+                dedupe=dedupe if it.get("dedupe", None) is None else bool(it["dedupe"]),
+            )
+            all_up.extend(res.get("upserted", []))
+            skipped.extend(res.get("skipped", []))
+        except Exception as ex:
+            skipped.append({"reason": "item-failed", "error": str(ex)})
+
+    return {"upserted": all_up, "skipped": skipped}
+
