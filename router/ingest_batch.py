@@ -4,7 +4,8 @@ import os
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Header, HTTPException, Body
 
-from agent.ingest import ingest_batch as do_ingest  # self-contained ingest
+# Calls the ingestion you already have (agent/ingest.py)
+from agent.ingest import ingest_batch as do_ingest
 
 router = APIRouter()
 
@@ -15,7 +16,7 @@ def _auth(x_api_key: Optional[str]):
     if not want or x_api_key != want:
         raise HTTPException(status_code=401, detail="invalid X-API-Key")
 
-@router.post("/ingest/batch")  # final path is EXACTLY /ingest/batch
+@router.post("/ingest/batch")   # final path is EXACTLY /ingest/batch
 def ingest_batch_handler(
     payload: Dict[str, Any] = Body(...),
     x_api_key: Optional[str] = Header(None),
