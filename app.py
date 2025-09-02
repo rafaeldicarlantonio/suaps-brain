@@ -1,7 +1,7 @@
 import os
 import uuid
 from typing import Optional, List, Dict
-
+from router import ingest_batch as ingest_router
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -13,9 +13,7 @@ except Exception:
     store = None
     retrieval = None
     distill_chunk = None
-from router import ingest_batch as ingest_router
-app.include_router(ingest_router.router)
-# Routers (comment out if a router is missing)
+
 try:
     from router.upload import router as upload_router
 except Exception:
@@ -31,7 +29,7 @@ except Exception:
 
 # Create the app ONCE
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
-
+app.include_router(ingest_router.router)   # gives you POST /ingest/batch
 # Register routers AFTER app is created (only if they exist)
 if upload_router is not None:
     include_router(upload_router)
