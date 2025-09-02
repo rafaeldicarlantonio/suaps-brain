@@ -188,7 +188,12 @@ def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: in
 # ---------------------------------------------------------------------
 # Distillation (summary/tags)
 # ---------------------------------------------------------------------
-def distill_chunk(text: str) -> Dict[str, Any]:
+def distill_chunk(
+    text: str,
+    title: str | None = None,
+    tags: list[str] | None = None,
+    **kwargs,            # <-- accept extras like user_id, session_id
+):
     """
     Returns {title, summary, tags}
     """
