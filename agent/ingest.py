@@ -37,6 +37,32 @@ OVERLAP_TOKENS = 120
 NEAR_DUP_SIMHASH_BITS = 64
 NEAR_DUP_THRESHOLD = 0.92
 MAX_TAGS = 8
+# Default user for ingestion if none is provided
+
+DEFAULT_INGEST_USER_EMAIL = os.getenv("DEFAULT_INGEST_USER", "ingest@suaps.local")
+
+def _ensure_user_id(user_email: Optional[str]) -> str:
+    """
+    Returns a user.id (UUID) for the given email.
+    - If email is None: use DEFAULT_INGEST_USER_EMAIL
+    - Upserts a user row if missing.
+    """
+    email = (user_email or DEFAULT_INGEST_USER_EMAIL).strip().lower()
+    # Try existing
+    try:
+        res = supabase.table("users").select("id").eq("email", email).limit(1).execute()
+        if res.data:
+            return res.data[0]["id"]
+    except Exception as ex:
+        # If the users table doesn't exist in your schema, adjust this helper or remove the call below.
+        raise RuntimeError(f"Unable to query users table: {ex}")
+
+    # Insert if not exists
+    try:
+        ins = supabase.table("users").insert({"email": email, "name": email.split("@")[0]}).execute()
+        return ins.data[0]["id"]
+    except Exception as ex:
+        raise RuntimeError(f"Unable to upsert user '{email}': {ex}")
 
 
 # ============ Utilities ============
@@ -233,7 +259,7 @@ def _upsert_vector(mem_id: str, vec: List[float], namespace: str, meta: Dict[str
 
 def ingest_text(
     *,
-    title: Optional[str],
+     title: Optional[str],
     text: str,
     type: str,
     tags: Optional[List[str]] = None,
@@ -241,6 +267,7 @@ def ingest_text(
     role_view: Optional[List[str]] = None,
     file_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    user_email: Optional[str] = None,
     dedupe: bool = True,
 ) -> Dict[str, Any]:
     assert type in ("episodic", "semantic", "procedural"), "invalid type"
@@ -278,21 +305,30 @@ def ingest_text(
         meta = distill_chunk(text=ctext, title=title, tags=tags or [])
         ctitle = meta.get("title") or (title or "Untitled")
         ctags  = list(dict.fromkeys((tags or []) + (meta.get("tags") or [])))[:MAX_TAGS]
+        # resolve user id (required by your DB schema)
+        try:
+            uid = _ensure_user_id(user_email)
+        except Exception as ex:
+            logger.error("User resolution failed: %s", ex)
+            skipped.append({"reason":"user-resolution-failed","error": str(ex)})
+            continue
 
         # INSERT memory row
         try:
             ins = supabase.table("memories").insert({
-                "type": type,
-                "title": ctitle,
-                "text": ctext,
-                "tags": ctags,
-                "source": source or "ingest",
-                "file_id": file_id,
-                "session_id": session_id,
-                "role_view": role_view or [],
-                "dedupe_hash": dh,
-                "created_at": datetime.utcnow().isoformat()
-            }).execute()
+    "user_id": uid,                         # <-- REQUIRED by your schema
+    "type": type,
+    "title": ctitle,
+    "text": ctext,
+    "tags": ctags,
+    "source": source or "ingest",
+    "file_id": file_id,
+    "session_id": session_id,
+    "role_view": role_view or [],
+    "dedupe_hash": dh,
+    "created_at": datetime.utcnow().isoformat()
+}).execute()
+
             mem_id = ins.data[0]["id"]
         except Exception as ex:
             logger.error("Supabase insert failed: %s", ex)
@@ -349,7 +385,7 @@ def ingest_batch(items: List[Dict[str, Any]], dedupe: bool = True) -> Dict[str, 
     all_up: List[Dict[str, Any]] = []
     all_sk: List[Dict[str, Any]] = []
     for it in items:
-        res = ingest_text(
+                res = ingest_text(
             title      = it.get("title"),
             text       = it.get("text") or "",
             type       = it.get("type") or "semantic",
@@ -358,8 +394,10 @@ def ingest_batch(items: List[Dict[str, Any]], dedupe: bool = True) -> Dict[str, 
             role_view  = it.get("role_view") or [],
             file_id    = it.get("file_id"),
             session_id = it.get("session_id"),
+            user_email = it.get("user_email"),     # <-- NEW: will default to DEFAULT_INGEST_USER if None
             dedupe     = dedupe if it.get("dedupe", None) is None else bool(it["dedupe"]),
         )
+
         all_up.extend(res.get("upserted", []))
         all_sk.extend(res.get("skipped", []))
     return {"upserted": all_up, "skipped": all_sk}
