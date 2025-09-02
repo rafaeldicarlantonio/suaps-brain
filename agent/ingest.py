@@ -175,28 +175,56 @@ def distill_chunk(*, user_id: Optional[str], raw_text: str, base_tags: List[str]
             except Exception:
                 pass
 
-        # insert memory row
-        tags = list({*base_tags, *[t for t in meta["tags"] if isinstance(t,str)]})
-        mem_id = store.insert_memory(type=type, title=title, text=text_payload, tags=tags, source=source,
-                                     file_id=file_id, session_id=None, author_user_id=user_id, role_view=role_view, dedupe_hash=dedupe_hash)
+       # insert memory row
+tags = list({*base_tags, *(t for t in meta.get("tags", []) if isinstance(t, str))})
+mem_id = store.insert_memory(
+    type=_type,
+    title=title,
+    text=text_payload,
+    tags=tags,
+    source=source,
+    file_id=file_id,
+    session_id=None,
+    author_user_id=user_id,
+    role_view=role_view,
+    dedupe_hash=dedupe_hash,
+)
+
 # upsert entities and bind mentions
 for ent in (summary.get("entities") or []):
-    name = ent.get("name","").strip()
-    etype = ent.get("type","").strip().lower()
-    if not name or etype not in {"person","org","project","artifact","concept"}:
+    name = (ent.get("name", "") or "").strip()
+    etype = (ent.get("type", "") or "").strip().lower()
+    if not name or etype not in {"person", "org", "project", "artifact", "concept"}:
         continue
-    e = store.ensure_entity(name, etype)            # NEW helper
-    store.upsert_entity_mention(e["id"], mem_id)    # NEW helper
-# (optional) infer edges from text; store.upsert_entity_edge(src_id, dst_id, rel)
+    e = store.ensure_entity(name, etype)                 # NEW helper
+    store.upsert_entity_mention(e["id"], mem_id)         # NEW helper
+# (optional) infer edges: store.upsert_entity_edge(src_id, dst_id, rel)
 
-        # upsert to pinecone (embedding_id is vector id)
-        try:
-            upsert_memory_vector(mem_id=mem_id, user_id=user_id, type_=type, content=text_payload, title=title,
-                                 tags=tags, importance=1, created_at_iso=None, source=source, role_view=role_view, entity_ids=[])
-            emb_id = f"mem_{mem_id}"
-            store.update_memory_embedding_id(mem_id, emb_id)
-        except Exception as ex:
-            store.log_tool_run("ingest_embed_upsert", {"memory_id": mem_id}, {"error": str(ex)}, False, int((time.time()-t0)*1000))
+# upsert to pinecone (embedding_id is vector id)
+emb_id = f"mem_{mem_id}"
+try:
+    retrieval.upsert_memory_vector(
+        mem_id=mem_id,
+        user_id=user_id,
+        type=_type,
+        content=text_payload,
+        title=title,
+        tags=tags,
+        importance=1.2,
+        created_at_iso=None,
+        source=source,
+        role_view=role_view,
+        entity_ids=[],  # TODO: fill with real ids once mentions are persisted
+    )
+    store.update_memory_embedding_id(mem_id, emb_id)
+except Exception as ex:
+    store.log_tool_run(
+        "ingest_embed_upsert",
+        {"memory_id": str(mem_id)},
+        {"error": str(ex)},
+        False,
+        int((time.time() - t0) * 1000),
+    )
 
         # entities
         try:
