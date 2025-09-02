@@ -220,8 +220,9 @@ def _embed_vec(text: str) -> List[float]:
     r = _oai_client.embeddings.create(model=EMBED_MODEL, input=text)
     return r.data[0].embedding
 
-def _pinecone_index() -> Index:
-    return Index(PINECONE_INDEX)
+def _pinecone_index():
+    return get_index()
+
 
 def _upsert_vector(mem_id: str, vec: List[float], namespace: str, meta: Dict[str, Any]) -> None:
     idx = _pinecone_index()
