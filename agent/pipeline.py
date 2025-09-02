@@ -81,11 +81,11 @@ def _assemble_messages(procedural: str, context_blocks: List[Dict[str, Any]], hi
     return msgs
 
 def _llm_answer(messages: List[Dict], temperature: Optional[float]) -> Any:
-    kwargs = {"model": CHAT_MODEL, "messages": messages}
-    final_temp = DEFAULT_CHAT_TEMPERATURE if temperature is None else float(temperature)
-    if os.getenv("CHAT_ALLOW_TEMPERATURE", "true").lower() == "true":
+    kwargs = {"model": _MODEL, "messages": messages}
+    final_temp = DEFAULT__TEMPERATURE if temperature is None else float(temperature)
+    if os.getenv("_ALLOW_TEMPERATURE", "true").lower() == "true":
         kwargs["temperature"] = final_temp
-    return openai_client.chat.completions.create(**kwargs)
+    return openai_client..completions.create(**kwargs)
 
 def _extract_autosave_candidates(answer: str) -> list[dict]:
     try:
@@ -95,7 +95,7 @@ def _extract_autosave_candidates(answer: str) -> list[dict]:
             "fact_type (decision|deadline|procedure|entity), title, text, tags (array), confidence (0-1). "
             f"\n\nText:\n{answer}"
         )
-        resp = openai_client.chat.completions.create(
+        resp = openai_client..completions.create(
             model=EXTRACTOR_MODEL,
             messages=[
                 {"role": "system", "content": "You are a JSON-only extractor."},
@@ -174,49 +174,44 @@ def chat(
             "latency_ms": int((time.time() - t0) * 1000),
         },
     }
-
-    # Red-team (best-effort)
-    try:
-        if redteam and hasattr(redteam, "review"):
-            verdict = redteam.review(message, raw_answer, ranked)
-        else:
-            verdict = {"action": "allow", "reasons": []}
-    except Exception as ex:
-        verdict = {"action": "allow", "error": str(ex)}
-    draft["redteam"] = verdict
-# After building `raw_answer`, before saving assistant:
+# --- Red-team (enforce) ---
 verdict = {"action": "allow", "reasons": []}
+
 try:
     if redteam and hasattr(redteam, "review"):
         verdict = redteam.review(
-            draft={ "answer": raw_answer, "citations": citations },
-            prompt=message, 
-            retrieved_chunks=ranked
-        )
+            draft={"answer": raw_answer, "citations": citations},
+            prompt=message,
+            retrieved_chunks=ranked,
+        ) or {"action": "allow", "reasons": []}
 except Exception as ex:
-    verdict = {"action":"allow","reasons":[f"reviewer_error:{ex}"]}
+    verdict = {"action": "allow", "reasons": [f"review_error:{ex}"]}
 
-if verdict.get("action") == "block":
-    raw_answer = "I can’t answer confidently with the available evidence. Try narrowing by date or tag, or upload the source."
-elif verdict.get("action") == "revise":
-    # One constrained regeneration pass
-    edit_instructions = "\n".join(verdict.get("required_edits", [])[:6])
-    resp = openai_client.chat.completions.create(
-        model=CHAT_MODEL, temperature=0,
-        messages=[
-            {"role":"system","content":"Revise the answer strictly per edits. No new claims."},
-            {"role":"user","content":f"Original answer:\n{raw_answer}\n\nEdits:\n{edit_instructions}"}
-        ]
+# expose verdict in your response/draft if you keep that object
+draft["redteam"] = verdict
+
+if verdict["action"] == "block":
+    raw_answer = (
+        "I can’t answer confidently with the available evidence. "
+        "Try narrowing by date or tag, or upload the source."
     )
-    raw_answer = resp.choices[0].message.content.strip()
+elif verdict["action"] == "revise":
+    edit_instructions = "\n".join(verdict.get("required_edits", [])[:6])
+    try:
+        revised = openai_client.chat.completions.create(
+            model=CHAT_MODEL,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "Revise the answer strictly per edits. No new claims."},
+                {"role": "user", "content": f"Original:\n{raw_answer}\n\nEdits:\n{edit_instructions}"},
+            ],
+        )
+        raw_answer = revised.choices[0].message.content.strip()
+    except Exception as ex:
+        verdict["reasons"].append(f"revise_error:{ex}")
+# --- end red-team (enforce) ---
 
-# Optional: seed 1–2 mentor questions
-if not guidance_questions:
-    guidance_questions = [
-        "Does this align with the current publication deliverables?",
-        "Should we promote a checklist to procedural memory?"
-    ][:2]
-
+   
     # Save assistant turn
     _save_message(sid, "assistant", draft["answer"])
 
