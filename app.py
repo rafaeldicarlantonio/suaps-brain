@@ -6,6 +6,8 @@ from typing import Optional, List, Dict
 from fastapi import FastAPI, Header, HTTPException
 from router.upload import router as upload_router
 from router.debug import router as debug_router
+from router.chat import router as chat_router
+app.include_router(chat_router)
 from pydantic import BaseModel, Field, field_validator
 
 from agent import store, pipeline, retrieval
@@ -111,42 +113,6 @@ def whoami(user_id: Optional[str] = None, user_email: Optional[str] = None, x_ap
     u = _resolve_user(user_id, user_email)
     return {"authorized": True, "user": {"id": u["id"], "email": u.get("email")}}
 
-# --------------------------------------------------------------------
-# Chat
-# --------------------------------------------------------------------
-@app.post("/chat")
-def chat(body: ChatInput, x_api_key: Optional[str] = Header(None)):
-    auth(x_api_key)
-    try:
-        user_row = _resolve_user(body.user_id, body.user_email)
-    except Exception as ex:
-        raise HTTPException(status_code=400, detail=f"user resolution error: {ex}")
-
-    try:
-        session_id, draft = pipeline.chat(
-            user_id=user_row["id"],
-            session_id=body.session_id,
-            message=body.message,
-            history=body.history,
-            temperature=body.temperature,
-        )
-
-        # --- AUTOSAVE ---
-        autosave_result = autosave_from_candidates(draft.get("autosave_candidates", []), session_id)
-
-        return {
-            "session_id": session_id,
-            "answer": draft.get("answer"),
-            "citations": draft.get("citations", []),
-            "guidance_questions": draft.get("guidance_questions", []),
-            "autosave": autosave_result,
-            "redteam": draft.get("redteam", {}),
-            "metrics": draft.get("metrics", {}),
-        }
-    except HTTPException:
-        raise
-    except Exception as ex:
-        raise HTTPException(status_code=502, detail=f"chat pipeline error: {ex}")
 
 # --------------------------------------------------------------------
 # Memories Upsert
