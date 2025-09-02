@@ -1,41 +1,42 @@
-from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-import os
 from agent.ingest import ingest_text
+
+# router/ingest_batch.py
+from __future__ import annotations
+
+import os
+from typing import Optional, Any, Dict, List
+from fastapi import APIRouter, Header, HTTPException, Body
+
+from agent.ingest import ingest_batch as do_ingest  # <-- uses the self-contained ingest we patched
 
 router = APIRouter()
 
-def _require_api_key(req: Request):
-    want = os.getenv("ACTIONS_API_KEY")
-    if not want: return
-    got = req.headers.get("x-api-key")
-    if got != want:
-        raise HTTPException(status_code=401, detail="invalid api key")
-
-class IngestItem(BaseModel):
-    text: str
-    type: str  # "semantic" | "episodic" | "procedural"
-    title: Optional[str] = None
-    tags: Optional[List[str]] = None
-    source: Optional[str] = None
-    role_view: Optional[List[str]] = None
-
-class IngestBatchRequest(BaseModel):
-    items: List[IngestItem]
+def _auth(x_api_key: Optional[str]):
+    want = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY")
+    if os.getenv("DISABLE_AUTH", "false").lower() == "true":
+        return
+    if not want or x_api_key != want:
+        raise HTTPException(status_code=401, detail="invalid X-API-Key")
 
 @router.post("/ingest/batch")
-async def ingest_batch(req: Request, body: IngestBatchRequest):
-    _require_api_key(req)
-    upserted, skipped = [], []
-    for it in body.items:
-        try:
-            mid, emb = ingest_text(
-                text=it.text, _type=it.type, title=it.title or "",
-                tags=it.tags or [], source=it.source or "api",
-                role_view=it.role_view or []
-            )
-            upserted.append({"memory_id": mid, "embedding_id": emb})
-        except Exception as ex:
-            skipped.append({"reason": str(ex)})
-    return {"upserted": upserted, "skipped": skipped}
+def ingest_batch_handler(
+    payload: Dict[str, Any] = Body(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    _auth(x_api_key)
+
+    items: List[Dict[str, Any]] = payload.get("items") or []
+    dedupe: bool = bool(payload.get("dedupe", True))
+
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="items must be a non-empty array")
+
+    try:
+        res = do_ingest(items=items, dedupe=dedupe)
+        return res
+    except HTTPException:
+        raise
+    except Exception as ex:
+        # surface the real error; do not reference store/retrieval here
+        raise HTTPException(status_code=500, detail=f"ingest_failed: {ex}")
