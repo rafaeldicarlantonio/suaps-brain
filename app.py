@@ -94,7 +94,30 @@ def _resolve_user(user_id: Optional[str], user_email: Optional[str]) -> Dict:
 # --------------------------------------------------------------------
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "auth_disabled": DISABLE_AUTH}
+    out = {"status":"ok"}
+    try:
+        # OpenAI
+        from vendors.openai_client import client, EMBED_MODEL
+        client.embeddings.create(model=EMBED_MODEL, input="ping")
+        out["openai"]=True
+    except Exception as ex:
+        out["openai"]=False; out["openai_error"]=str(ex)
+
+    try:
+        # Pinecone
+        from vendors.pinecone_client import pc
+        idx = os.getenv("PINECONE_INDEX","uap-kb")
+        out["pinecone"]= idx in [i["name"] for i in pc.list_indexes()]
+    except Exception as ex:
+        out["pinecone"]=False; out["pinecone_error"]=str(ex)
+
+    try:
+        from vendors.supabase_client import supabase
+        supabase.table("memories").select("id").limit(1).execute()
+        out["supabase"]=True
+    except Exception as ex:
+        out["supabase"]=False; out["supabase_error"]=str(ex)
+    return out
 
 @app.get("/whoami")
 def whoami(user_id: Optional[str] = None, user_email: Optional[str] = None, x_api_key: Optional[str] = Header(None)):
