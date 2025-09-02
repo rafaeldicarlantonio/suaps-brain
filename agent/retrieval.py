@@ -3,9 +3,6 @@ from vendors.pinecone_client import INDEX
 from datetime import datetime, timezone
 import os, math
 
-# NEW: use helpers from memory/selection.py
-from memory.selection import hybrid_rank, pack_to_budget, one_hop_graph
-
 TOPK_PER_TYPE = int(os.getenv("TOPK_PER_TYPE", "30"))
 RECENCY_HALFLIFE_DAYS = int(os.getenv("RECENCY_HALFLIFE_DAYS", "90"))
 
@@ -35,18 +32,32 @@ def upsert_memory_vector(mem_id: str, user_id: str | None, type_: str, content: 
     vid = f"mem_{mem_id}" if not str(mem_id).startswith("mem_") else str(mem_id)
     INDEX.upsert(vectors=[{"id": vid, "values": vec, "metadata": meta}], namespace=type_)
 
+def _recency_score(created_at_iso: str | None) -> float:
+    try:
+        if not created_at_iso: return 0.5
+        dt = datetime.fromisoformat(created_at_iso.replace("Z","+00:00"))
+        days = (datetime.now(timezone.utc) - dt).days
+        return math.exp(-math.log(2) * (days / RECENCY_HALFLIFE_DAYS))
+    except Exception:
+        return 0.5
+
+def _entity_overlap(q_entities: set, e_ids: list) -> float:
+    if not q_entities or not e_ids: return 0.0
+    s = set(e_ids)
+    inter = len(q_entities & s)
+    union = len(q_entities | s)
+    return (inter / union) if union else 0.0
+
+def _source_priority(src: str | None) -> float:
+    m = {"minutes":1.0, "sop":0.9, "wiki":0.7, "transcript":0.6}
+    return m.get((src or "").lower(), 0.5)
+
 def search_per_type(user_id: str | None, query: str, types=None, top_k:int = TOPK_PER_TYPE):
     vec = embed(query)
     types = types or ["episodic","semantic","procedural"]
     results = []
     flt = {"deleted": False}
-if user_id: flt["user_id"] = str(user_id)
-if role:
-    flt["$or"] = [
-        {"role_view": {"$eq": []}},
-        {"role_view": {"$contains": role}}
-    ]
-
+    if user_id: flt["user_id"] = str(user_id)
     for t in types:
         res = INDEX.query(vector=vec, top_k=top_k, include_metadata=True, filter=flt, namespace=t)
         for m in (res.matches or []):
@@ -55,6 +66,21 @@ if role:
             md["__score_semantic"] = float(m.score or 0.0)
             results.append(md)
     return results
+
+def hybrid_rank(query: str, candidates: list[dict], q_entities: set | None = None):
+    q_entities = q_entities or set()
+    scored = []
+    for md in candidates:
+        sem = float(md.get("__score_semantic", 0.0))
+        rec = _recency_score(md.get("created_at"))
+        ent = _entity_overlap(q_entities, md.get("entity_ids") or [])
+        src = _source_priority(md.get("source"))
+        total = 0.55*sem + 0.20*rec + 0.15*ent + 0.10*src
+        md2 = dict(md)
+        md2["__score_hybrid"] = total
+        scored.append(md2)
+    scored.sort(key=lambda x: x["__score_hybrid"], reverse=True)
+    return scored
 
 # Backward-compatible search
 def search(user_id: str | None, query: str, top_k=6, types=None):
