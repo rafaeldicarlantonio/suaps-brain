@@ -1,4 +1,3 @@
-
 """
 agent/ingest.py
 ----------------
@@ -62,18 +61,18 @@ def _approx_tokens(s: str) -> int:
 # ---------------------------------------------------------------------
 # Normalization
 # ---------------------------------------------------------------------
-_HEADER_FOOTER_RE = re.compile(r'^(page \\d+|\\d+)$', re.IGNORECASE)
-_MULTISPACE_RE = re.compile(r'[ \\t\\u00A0\\x0b\\x0c]+')
-_MULTINEWLINE_RE = re.compile(r'\\n{3,}')
+_HEADER_FOOTER_RE = re.compile(r'^(page \d+|\d+)$', re.IGNORECASE)
+_MULTISPACE_RE = re.compile(r'[ \t\u00A0\x0b\x0c]+')
+_MULTINEWLINE_RE = re.compile(r'\n{3,}')
 
 def clean_text(text: str) -> str:
     if not text:
         return ""
     # unify newlines
-    t = text.replace('\\r\\n', '\\n').replace('\\r', '\\n')
+    t = text.replace('\r\n', '\n').replace('\r', '\n')
     # drop lines that look like headers/footers/page numbers
     lines = []
-    for ln in t.split('\\n'):
+    for ln in t.split('\n'):
         s = ln.strip()
         if not s:
             lines.append('')
@@ -81,26 +80,26 @@ def clean_text(text: str) -> str:
         if _HEADER_FOOTER_RE.match(s.lower()):
             continue
         lines.append(ln)
-    t = '\\n'.join(lines)
+    t = '\n'.join(lines)
     # collapse spaces
     t = _MULTISPACE_RE.sub(' ', t)
     # collapse multiple blank lines
-    t = _MULTINEWLINE_RE.sub('\\n\\n', t)
+    t = _MULTINEWLINE_RE.sub('\n\n', t)
     # strip BOM / zero-width
-    t = t.replace('\\ufeff', '').replace('\\u200b', '')
+    t = t.replace('\ufeff', '').replace('\u200b', '')
     return t.strip()
 
 # ---------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------
-_HEADING_RE = re.compile(r'^(#{1,6}\\s+.+|\\s*[A-Z][A-Z0-9 \\-]{6,}\\s*)$')  # markdown or SCREAMING headings
-_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\\s+(?=[A-Z0-9(])')
+_HEADING_RE = re.compile(r'^(#{1,6}\s+.+|\s*[A-Z][A-Z0-9 \-]{6,}\s*)$')  # markdown or SCREAMING headings
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z0-9(])')
 
 def _split_headings(text: str) -> List[Tuple[str, str]]:
     """
     Returns list of (heading, section_text). Heading may be '' for preface.
     """
-    lines = text.split('\\n')
+    lines = text.split('\n')
     chunks: List[Tuple[str, List[str]]] = []
     cur_head = ''
     cur_buf: List[str] = []
@@ -115,10 +114,10 @@ def _split_headings(text: str) -> List[Tuple[str, str]]:
             cur_buf.append(ln)
     if cur_buf:
         chunks.append((cur_head, cur_buf))
-    return [(h, '\\n'.join(buf).strip()) for h, buf in chunks]
+    return [(h, '\n'.join(buf).strip()) for h, buf in chunks]
 
 def _split_paragraphs(section_text: str) -> List[str]:
-    parts = [p.strip() for p in re.split(r'\\n\\s*\\n+', section_text) if p.strip()]
+    parts = [p.strip() for p in re.split(r'\n\s*\n+', section_text) if p.strip()]
     return parts
 
 def _split_sentences(paragraph: str) -> List[str]:
@@ -142,7 +141,7 @@ def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: in
             nonlocal buf, buf_tokens, start_tok
             if not buf:
                 return
-            txt = '\\n'.join(buf).strip()
+            txt = '\n'.join(buf).strip()
             if not txt:
                 buf, buf_tokens = [], 0
                 return
@@ -178,7 +177,7 @@ def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: in
     merged: List[Dict[str, Any]] = []
     for c in chunks:
         if merged and c["approx_tokens"] < min(200, int(0.25*target_tokens)):
-            merged[-1]["text"] = (merged[-1]["text"].rstrip() + "\\n\\n" + c["text"].lstrip()).strip()
+            merged[-1]["text"] = (merged[-1]["text"].rstrip() + "\n\n" + c["text"].lstrip()).strip()
             merged[-1]["approx_tokens"] = _approx_tokens(merged[-1]["text"])
             merged[-1]["end_token"] = merged[-1]["start_token"] + merged[-1]["approx_tokens"]
         else:
@@ -189,30 +188,37 @@ def chunk_text(text: str, target_tokens: int = TARGET_TOKENS, overlap_tokens: in
 # Distillation (summary/tags)
 # ---------------------------------------------------------------------
 def distill_chunk(
-    text: str,
-    title: str | None = None,
-    tags: list[str] | None = None,
-    **kwargs,            # <-- accept extras like user_id, session_id
+    text: Optional[str] = None,
+    title: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    **kwargs,            # accept extras like user_id, session_id
 ):
     """
     Returns {title, summary, tags}
+    - Be tolerant to callers: if 'text' wasn't passed as keyword, try common alternates.
     """
+    # --- safety guard: ensure we have text even if caller forgot/renamed it ---
+    if text is None:
+        text = kwargs.get("chunk_text") or kwargs.get("content") or kwargs.get("body")
     if not text:
-        return {"title": None, "summary": "", "tags": []}
+        raise TypeError("distill_chunk(): 'text' is required")
+    # --------------------------------------------------------------------------
+
     if _oai_client is None:
         # fallback heuristic
-        first_line = text.strip().split('\\n', 1)[0][:120]
+        first_line = text.strip().split('\n', 1)[0][:120]
         import re as _re
-        words = _re.findall(r'[A-Za-z][A-Za-z0-9\\-]{3,}', text.lower())
+        words = _re.findall(r'[A-Za-z][A-Za-z0-9\-]{3,}', text.lower())
         freq = {}
         for w in words:
             freq[w] = freq.get(w, 0) + 1
         tags = [w for w,_ in sorted(freq.items(), key=lambda t: (-t[1], t[0]))[:5]]
-        return {"title": first_line, "summary": text[:500], "tags": tags[:MAX_TAGS]}
+        return {"title": title or first_line, "summary": text[:500], "tags": (tags or [])[:MAX_TAGS]}
+
     prompt = (
-        "Summarize the following chunk for a knowledge base.\\n"
-        "Return JSON with keys: title, summary, tags (<=8 short tags).\\n"
-        "Text:\\n---\\n" + text[:8000] + "\\n---"
+        "Summarize the following chunk for a knowledge base.\n"
+        "Return JSON with keys: title, summary, tags (<=8 short tags).\n"
+        "Text:\n---\n" + text[:8000] + "\n---"
     )
     resp = _oai_client.chat.completions.create(
         model=CHAT_MODEL, temperature=0.2,
@@ -220,17 +226,22 @@ def distill_chunk(
         messages=[{"role":"user","content": prompt}]
     )
     try:
-        return json.loads(resp.choices[0].message.content)
+        js = json.loads(resp.choices[0].message.content)
+        return {
+            "title": js.get("title") or title,
+            "summary": js.get("summary") or text[:500],
+            "tags": (js.get("tags") or [])[:MAX_TAGS],
+        }
     except Exception:
-        first = text.strip().split('\\n', 1)[0][:120]
-        return {"title": first, "summary": text[:500], "tags": []}
+        first = text.strip().split('\n', 1)[0][:120]
+        return {"title": title or first, "summary": text[:500], "tags": []}
 
 # ---------------------------------------------------------------------
 # Dedupe helpers (exact + simhash)
 # ---------------------------------------------------------------------
 def _normalize_for_hash(s: str) -> str:
     s = s.lower().strip()
-    s = re.sub(r'\\s+', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
     return s
 
 def compute_dedupe_hash(s: str) -> str:
@@ -317,13 +328,20 @@ def ingest_text(*, title: Optional[str], text: str, type: str, tags: Optional[Li
                 continue
         batch_simhashes.append(sh)
 
-        # distill
-        meta = distill_chunk(ctext)
+        # distill (must pass text explicitly)
+        try:
+            meta = distill_chunk(text=ctext, title=title, tags=tags or [])
+        except TypeError as ex:
+            # make this error visible to the client instead of a proxy 502
+            raise
+        except Exception as ex:
+            logger.warning("distill_chunk failed, falling back: %s", ex)
+            meta = {"title": title or ctext[:80], "summary": ctext[:500], "tags": tags or []}
+
         ctitle = meta.get("title") or (title or "Untitled")
         ctags = list(set((tags or []) + (meta.get("tags") or [])))[:MAX_TAGS]
 
         # insert memory row
-        mem_row = None
         try:
             if store is None:
                 mem_row = {"id": f"tmp_{len(upserted)+1}", "type": type}
@@ -349,11 +367,17 @@ def ingest_text(*, title: Optional[str], text: str, type: str, tags: Optional[Li
 
         mem_id = mem_row["id"]
 
-        # entities & mentions
+        # entities & mentions (best-effort)
         ents: List[str] = []
         if _entities and hasattr(_entities, "extract_entities"):
             try:
-                ents = _entities.extract_entities(ctext)
+                ents = _entities.extract_entities(ctext) or []
+                # tolerate different return shapes
+                if ents and not isinstance(ents[0], (str,)):
+                    # if tuples/dicts returned, try to keep just ids/names
+                    ents = [e[0] if isinstance(e, (list, tuple)) else (e.get("id") or e.get("name"))
+                            for e in ents if e]
+                    ents = [e for e in ents if isinstance(e, str)]
             except Exception as ex:
                 logger.warning("entity extraction failed: %s", ex)
 
