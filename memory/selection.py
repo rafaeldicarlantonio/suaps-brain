@@ -68,15 +68,19 @@ def one_hop_graph(records: List[Dict[str,Any]], db=None, limit:int=10) -> List[D
             continue
     return out
 
-def pack_to_budget(history: List[Dict[str,Any]], ranked: List[Dict[str,Any]], budget:int=MAX_CONTEXT_TOKENS) -> List[Dict[str,Any]]:
-    # naive: just return top until budget; ignore token calc
-    ctx=[]
-    count=0
-    for h in history:
-        ctx.append(h)
+def pack_to_budget(history, ranked, budget=MAX_CONTEXT_TOKENS):
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+    ctx, used = list(history), sum(len(enc.encode(h.get("content",""))) for h in history if h.get("content"))
+    kept = []
     for r in ranked:
-        if count>budget:
-            break
-        ctx.append(r)
-        count += len((r.get("text") or "").split())
+        t = (r.get("text") or r.get("content") or "")
+        need = len(enc.encode(t))
+        if used + need > budget: break
+        # cosine dedupe
+        if not is_near_duplicate(r, kept):  # implement cosine>0.98 check using stored embeddings if available
+            kept.append(r)
+            ctx.append(r)
+            used += need
     return ctx
+
