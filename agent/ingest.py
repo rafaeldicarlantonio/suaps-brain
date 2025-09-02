@@ -179,6 +179,15 @@ def distill_chunk(*, user_id: Optional[str], raw_text: str, base_tags: List[str]
         tags = list({*base_tags, *[t for t in meta["tags"] if isinstance(t,str)]})
         mem_id = store.insert_memory(type=type, title=title, text=text_payload, tags=tags, source=source,
                                      file_id=file_id, session_id=None, author_user_id=user_id, role_view=role_view, dedupe_hash=dedupe_hash)
+# upsert entities and bind mentions
+for ent in (summary.get("entities") or []):
+    name = ent.get("name","").strip()
+    etype = ent.get("type","").strip().lower()
+    if not name or etype not in {"person","org","project","artifact","concept"}:
+        continue
+    e = store.ensure_entity(name, etype)            # NEW helper
+    store.upsert_entity_mention(e["id"], mem_id)    # NEW helper
+# (optional) infer edges from text; store.upsert_entity_edge(src_id, dst_id, rel)
 
         # upsert to pinecone (embedding_id is vector id)
         try:
