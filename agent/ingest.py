@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------- Vendors (required) ----------
 from vendors.openai_client import client as _oai_client, EMBED_MODEL, CHAT_MODEL  # env must have OPENAI_API_KEY
 from vendors.supabase_client import supabase                                       # must be configured
-from pinecone import Index                                                         # pinecone v5; needs PINECONE_API_KEY
+from vendors.pinecone_client import get_index
 
 # ---------- Optional project modules (if present) ----------
 try:
