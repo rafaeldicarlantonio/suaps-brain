@@ -4,7 +4,7 @@ from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-
+from router.ingest_batch import router as ingest_router
 # Routers
 # - ingest router is a MODULE exposing `router = APIRouter()`
 # - upload/chat/debug import the APIRouter object directly as `router`
@@ -39,6 +39,10 @@ except Exception:
 
 # Create the app ONCE
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
+@app.get("/debug/routes")
+def list_routes():
+    # returns every registered route path; use in a browser to confirm your routes
+    return {"routes": [r.path for r in app.routes]}
 
 # --- Include routers (fixes previous NameError: use app.include_router) ---
 if ingest_router is not None and hasattr(ingest_router, "router"):
