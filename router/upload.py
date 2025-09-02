@@ -22,14 +22,19 @@ def _read_file(file: UploadFile) -> str:
     # naive handling for MVP
     if mime in ("text/markdown","text/plain","application/json"):
         return raw.decode("utf-8", errors="ignore")
-    if mime in ("application/pdf",):
-        try:
-            import pypdf
-            from io import BytesIO
-            r = pypdf.PdfReader(BytesIO(raw))
-            return "\n".join([p.extract_text() or "" for p in r.pages])
-        except Exception:
-            return raw.decode("utf-8","ignore")
+    if mime == "application/pdf":
+    # 1) Try text layer first (cheap)
+    text = try_pypdf(raw)
+
+    # 2) If too sparse AND OCR explicitly enabled, OCR the PDF
+    if text_density(text, raw) < float(os.getenv("OCR_DENSITY_THRESHOLD", "0.05")) \
+       and os.getenv("ENABLE_PDF_OCR", "false").lower() == "true":
+        ocr_text = ocr_pdf_bytes_with_tesseract(raw)
+        if ocr_text:
+            text = ocr_text
+
+    # continue with your normalization / ingest flow using `text`
+
     if mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"):
         try:
             import docx
