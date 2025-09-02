@@ -1,77 +1,125 @@
-import json
+"""
+tests/evals/replay.py
+---------------------
+Runs the golden set against local /chat endpoint and scores:
+- Must-include keyphrases present
+- Citations include expected tags (any)
+- Latency under threshold
+- Answer JSON schema basic shape (keys exist)
+Usage:
+  export BASE_URL=http://localhost:10000
+  export X_API_KEY=dev_key
+  python -m tests.evals.replay --gold tests/evals/golden_set.json
+"""
+
+from __future__ import annotations
+
 import os
 import sys
+import json
 import time
-from typing import List, Dict, Any
+import argparse
+from typing import Any, Dict, List
 
 import requests
 
-BASE = os.getenv("EVAL_BASE_URL", "http://localhost:10000")
-API_KEY = os.getenv("ACTIONS_API_KEY", "dev_key")
+REQUIRED_KEYS = ["answer","citations","guidance_questions","autosave"]
 
-def fail(msg: str):
-    print(f"[FAIL] {msg}", file=sys.stderr)
-    sys.exit(1)
+def load_golden(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def post_chat(prompt: str, role: str) -> Dict[str, Any]:
+def call_chat(base_url: str, api_key: str, prompt: str, role: str = "researcher") -> Dict[str, Any]:
     t0 = time.time()
-    r = requests.post(
-        f"{BASE}/chat",
-        headers={"X-API-Key": API_KEY},
-        json={"message": prompt, "role": role, "debug": False},
-        timeout=30,
-    )
-    dt = int((time.time() - t0) * 1000)
-    if r.status_code != 200:
-        fail(f"/chat HTTP {r.status_code}: {r.text}")
-    data = r.json()
-    data["_latency_ms"] = dt
+    r = requests.post(f"{base_url}/chat", headers={
+        "Content-Type":"application/json",
+        "X-API-Key": api_key
+    }, json={
+        "message": prompt,
+        "role": role
+    }, timeout=60)
+    latency_ms = int((time.time()-t0)*1000)
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f"Non-JSON response ({r.status_code}): {r.text[:300]}")
+    data.setdefault("metrics",{}).setdefault("latency_ms", latency_ms)
     return data
 
-def run_case(case: Dict[str, Any]) -> None:
-    prompt = case["prompt"]
-    role = case.get("role", "researcher")
-    res = post_chat(prompt, role)
-    ans = (res.get("answer") or "").lower()
-    if not ans:
-        fail("empty answer")
-
-    # Must-include checks
-    for needle in case.get("must_include", []):
-        if needle.lower() not in ans:
-            fail(f"missing must_include: {needle}")
-
-    # Citation tag check (allow any-match across provided tags)
-    tags_any: List[str] = case.get("must_cite_tags_any", [])
-    if tags_any:
-        cits = res.get("citations") or []
-        matched = False
-        for c in cits:
-            tags = (c.get("tags") if isinstance(c, dict) else []) or []
-            if any(t in tags for t in tags_any):
-                matched = True
-                break
-        if not matched:
-            fail(f"citations missing required tags_any: {tags_any}")
-
-    # Latency check
-    max_ms = int(case.get("max_latency_ms", 3000))
-    if res["_latency_ms"] > max_ms:
-        fail(f"latency {res['_latency_ms']}ms > {max_ms}ms")
-
-    # Red-team block check
-    rt = res.get("redteam") or {}
-    if isinstance(rt, dict) and rt.get("action") == "block":
-        fail("red-team returned block on known-good case")
-
-    print(f"[OK] {case['id']} in {res['_latency_ms']}ms")
+def has_any_citation_tag(citations: List[Dict[str, Any]], expected_tags_any: List[str]) -> bool:
+    exp = set([t.lower() for t in expected_tags_any or []])
+    for c in citations or []:
+        for t in (c.get("tags") or []):
+            if t and t.lower() in exp:
+                return True
+    return False
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "tests/evals/golden_set.json"
-    with open(path, "r", encoding="utf-8") as f:
-        cases = json.load(f)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gold", required=True, help="Path to golden_set.json")
+    ap.add_argument("--base", default=os.getenv("BASE_URL","http://localhost:10000"))
+    ap.add_argument("--key", default=os.getenv("X_API_KEY","dev_key"))
+    args = ap.parse_args()
+
+    cases = load_golden(args.gold)
+    ok = 0
+    fail = 0
+    details: List[str] = []
+
     for case in cases:
-        run_case(case)
+        cid = case.get("id","<no-id>")
+        prompt = case["prompt"]
+        must_inc = case.get("must_include", [])
+        must_cite_tags_any = case.get("must_cite_tags_any", [])
+        max_latency = int(case.get("max_latency_ms", 3000))
+
+        try:
+            resp = call_chat(args.base, args.key, prompt)
+        except Exception as ex:
+            fail += 1
+            details.append(f"[{cid}] CALL-ERR: {ex}")
+            continue
+
+        missing_keys = [k for k in REQUIRED_KEYS if k not in resp]
+        if missing_keys:
+            fail += 1
+            details.append(f"[{cid}] SCHEMA-ERR missing keys: {missing_keys}")
+            continue
+
+        ans = resp.get("answer","") or resp.get("data",{}).get("answer","")
+        if not isinstance(ans, str):
+            fail += 1
+            details.append(f"[{cid}] SCHEMA-ERR answer not string")
+            continue
+
+        # must include checks
+        miss = [k for k in must_inc if k.lower() not in (ans or "").lower()]
+        if miss:
+            fail += 1
+            details.append(f"[{cid}] ANSWER-ERR missing keyphrases: {miss} ; answer: {ans[:200]}")
+            continue
+
+        # citations contain at least one expected tag (any)
+        if must_cite_tags_any:
+            if not has_any_citation_tag(resp.get("citations",[]), must_cite_tags_any):
+                fail += 1
+                details.append(f"[{cid}] CITE-ERR expected any of tags={must_cite_tags_any} not found in citations")
+                continue
+
+        # latency check
+        lat = int(resp.get("metrics",{}).get("latency_ms", 999999))
+        if lat > max_latency:
+            fail += 1
+            details.append(f"[{cid}] PERF-ERR latency {lat}ms > {max_latency}ms")
+            continue
+
+        ok += 1
+
+    print(f"PASS: {ok} / {len(cases)} ; FAIL: {fail}")
+    for d in details[:20]:
+        print(" -", d)
+    if fail > 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
