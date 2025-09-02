@@ -3,7 +3,7 @@ import os, io, time, mimetypes
 from typing import Optional, List
 from fastapi import APIRouter, File, UploadFile, Form, Header, HTTPException
 from agent import store, retrieval
-from agent.ingest import clean_text, distill_chunk
+from agent.ingest import clean_text, distill_chunk, ingest_text
 from vendors.supabase_client import supabase
 
 router = APIRouter()
