@@ -1,14 +1,10 @@
-from pydantic import BaseModel
-from agent.ingest import ingest_text
-
-# router/ingest_batch.py
 from __future__ import annotations
 
 import os
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Header, HTTPException, Body
 
-from agent.ingest import ingest_batch as do_ingest  # <-- uses the self-contained ingest we patched
+from agent.ingest import ingest_batch as do_ingest  # uses the self-contained ingest we patched
 
 router = APIRouter()
 
@@ -38,5 +34,4 @@ def ingest_batch_handler(
     except HTTPException:
         raise
     except Exception as ex:
-        # surface the real error; do not reference store/retrieval here
         raise HTTPException(status_code=500, detail=f"ingest_failed: {ex}")
