@@ -142,6 +142,19 @@ ANSWER_SCHEMA_JSON = {
     },
     "required":["answer","citations","guidance_questions","autosave_candidates"]
 }
+from validators.json import strict_parse_or_retry
+
+try:
+    draft_json = strict_parse_or_retry(llm_resp.choices[0].message.content)
+except Exception:
+    # Single repair attempt with response_format
+    llm_resp = _oai_client.chat.completions.create(
+        model=CHAT_MODEL,
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=messages_for_answerer,
+    )
+    draft_json = strict_parse_or_retry(llm_resp.choices[0].message.content)
 
 def _llm_json(prompt: str, context: str, temperature: Optional[float]=None) -> Dict[str, Any]:
     if _oai_client is None:
