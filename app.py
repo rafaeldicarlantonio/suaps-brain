@@ -13,7 +13,8 @@ except Exception:
     store = None
     retrieval = None
     distill_chunk = None
-
+from router import ingest_batch as ingest_router
+app.include_router(ingest_router.router)
 # Routers (comment out if a router is missing)
 try:
     from router.upload import router as upload_router
@@ -33,7 +34,7 @@ app = FastAPI(title="SUAPS Brain API", version="1.0.0")
 
 # Register routers AFTER app is created (only if they exist)
 if upload_router is not None:
-    app.include_router(upload_router)
+    include_router(upload_router)
 if chat_router is not None:
     app.include_router(chat_router)
 if debug_router is not None:
