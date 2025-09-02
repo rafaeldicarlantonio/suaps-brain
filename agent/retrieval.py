@@ -2,18 +2,14 @@
 agent/retrieval.py
 ------------------
 Retrieval helpers with PRD-compliant role filters and per-type querying.
-This module is import-safe and tolerant of missing dependencies.
-Exports:
-  - retrieve(...): list[dict]
-  - upsert_memory_vector(...): None
-  - embed_text(text): list[float]
+Import-safe and tolerant of missing dependencies.
 """
 
 from __future__ import annotations
 
 import os
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # <-- ensure Optional is defined
 
 logger = logging.getLogger(__name__)
 
