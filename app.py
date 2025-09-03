@@ -167,15 +167,24 @@ def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None))
     auth(x_api_key)
     if store is None or retrieval is None:
         raise HTTPException(status_code=500, detail="store/retrieval modules unavailable")
+
     try:
-        # HARD STOP: ignore incoming user_id; always resolve to a UUID
+        # resolve a UUID (ignores incoming user_id)
         user_row = _resolve_user(None, body.user_email if body.user_email else body.user_id)
         uid = user_row["id"]
+
+        # write memory (your store.upsert_memory should also set 'value' column)
         row = store.upsert_memory(uid, body.type, body.title, body.content, body.importance, body.tags)
+
+        # safety: if store returned nothing or no id, treat as no-op
+        if not row or not row.get("id"):
+            raise HTTPException(status_code=422, detail={"message": "No memory created"})
+
+        # vector upsert
         retrieval.upsert_memory_vector(
             mem_id=row["id"],
             user_id=uid,
-            type=body.type,               # NOTE: kwarg is 'type', not 'type_'
+            type=body.type,
             content=body.content,
             title=body.title,
             tags=body.tags,
@@ -186,11 +195,13 @@ def memories_upsert(body: MemoryUpsert, x_api_key: Optional[str] = Header(None))
             entity_ids=[],
         )
         store.update_memory_embedding_id(row["id"], f"mem_{row['id']}")
-        return {"id": row["id"]}
+
+        return {"id": row["id"], "summary": {"upserted_count": 1}}
     except HTTPException:
         raise
     except Exception as ex:
         raise HTTPException(status_code=502, detail=f"Upsert memory error: {ex}")
+
 
 # --------------------------------------------------------------------
 # IMPORTANT: Do NOT define /ingest/batch here to avoid conflicting with router/ingest_batch.py
