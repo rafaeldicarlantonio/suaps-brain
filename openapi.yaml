@@ -1,89 +1,119 @@
 openapi: 3.1.0
 info:
   title: SUAPS Brain API
-  version: "1.1"
-  description: FastAPI service for chat, upload, ingestion, memories, debug, and health.
+  version: '1.0.0'
 servers:
   - url: https://suaps-brain.onrender.com
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+# Apply API key to everything by default…
 security:
   - ApiKeyAuth: []
+
 paths:
   /healthz:
     get:
       operationId: healthz
-      summary: Liveness + dependency status
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                  supabase:
-                    type: boolean
-                  pinecone:
-                    type: boolean
-                  openai:
-                    type: boolean
-  /chat:
+      security: []    # no auth
+      responses: { '200': { description: ok } }
+
+  /debug/memories:
+    get:
+      operationId: debugMemories
+      security: []    # no auth
+      responses: { '200': { description: ok } }
+
+  /debug/ping:
+    get:
+      operationId: ping
+      security: []    # no auth
+      responses: { '200': { description: ok } }
+
+  /debug/echo:
     post:
-      operationId: chat
-      summary: Chat with retrieval + red-team + autosave
-      security:
-        - ApiKeyAuth: []
+      operationId: echo
+      security: []    # no auth to remove all auth variables
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: ok
+
+  /ingest/batch:
+    post:
+      operationId: ingestBatch
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required:
-                - message
+              additionalProperties: false
               properties:
-                user_email:
-                  type: string
-                role:
-                  type: string
-                  enum:
-                    - researcher
-                    - staff
-                    - director
-                    - admin
-                session_id:
-                  type: string
-                message:
-                  type: string
-                history:
+                items:
                   type: array
-                  items:
-                    type: object
-                temperature:
-                  type: number
-                preferences:
-                  type: object
-                debug:
-                  type: boolean
-              $ref: "#/components/schemas/ChatRequest"
+                  minItems: 1
+                  items: { $ref: '#/components/schemas/IngestItem' }
+                dedupe: { type: boolean }
+              required: [items]
       responses:
-        "200":
-          description: PRD chat response
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ChatResponse"
-        4XX:
-          description: Client error
-        5XX:
-          description: Server error
+        '200': { description: ok }
+
+    /memories/upsert:
+    post:
+      operationId: memoriesUpsert
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                type: { type: string, enum: [semantic, episodic, procedural] }
+                title: { type: string }
+                content: { type: string }
+                importance: { type: integer }
+                tags: { type: array, items: { type: string } }
+                user_email: { type: string }
+                user_id: { type: string }
+              required: [type, content]
+      responses: { '200': { description: ok } }
+
+
+    /chat:
+    post:
+      operationId: chat
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                prompt: { type: string }
+                session_id: { type: string }
+                role: { type: string, enum: [researcher, staff, director, admin] }
+                preferences: { type: object, additionalProperties: true }
+                debug: { type: boolean }
+              required: [prompt]
+      responses: { '200': { description: ok } }
   /upload:
     post:
       operationId: upload
-      summary: File upload -> text -> ingest
-      security:
-        - ApiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -91,288 +121,25 @@ paths:
             schema:
               type: object
               properties:
-                file:
-                  type: string
-                  format: binary
-                tags:
-                  type: string
+                file: { type: string, format: binary }
+                tags: { type: string }
       responses:
-        "200":
-          description: Upload + ingest result
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  file_id:
-                    type: string
-                    nullable: true
-                  bytes:
-                    type: integer
-                  mime_type:
-                    type: string
-                    nullable: true
-                  ingest_ids:
-                    type: array
-                    items:
-                      type: string
-                  latency_ms:
-                    type: integer
-  /ingest/batch:
-    post:
-      operationId: ingestBatch
-      summary: Ingest multiple text items (semantic or episodic)
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/IngestBatchRequest"
-              type: object
-              properties:
-                items:
-                  type: array
-                  items:
-                    type: object
-                    required:
-                      - text
-                    properties:
-                      user_email:
-                        type: string
-                      text:
-                        type: string
-                      type:
-                        type: string
-                        enum:
-                          - semantic
-                          - episodic
-                      tags:
-                        type: array
-                        items:
-                          type: string
-      responses:
-        "200":
-          description: Upsert summary
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  upserted:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        memory_id:
-                          type: string
-                        embedding_id:
-                          type: string
-                  skipped:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        reason:
-                          type: string
-  /memories/upsert:
-    post:
-      operationId: memoriesUpsert
-      summary: Direct memory create/update
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/MemoryUpsert"
-      responses:
-        "200":
-          description: OK
-  /debug/memories:
-    get:
-      operationId: debugMemories
-      summary: List recent memories
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - in: query
-          name: limit
-          schema:
-            type: integer
-            default: 20
-        - in: query
-          name: type
-          schema:
-            type: string
-            nullable: true
-      responses:
-        "200":
-          description: Latest memories
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id:
-                          type: string
-                        type:
-                          type: string
-                        title:
-                          type: string
-                          nullable: true
-                        tags:
-                          type: array
-                          items:
-                            type: string
-                        created_at:
-                          type: string
+        '200': { description: ok }
+
 components:
-  securitySchemes:
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
   schemas:
-    ChatRequest:
+    IngestItem:
       type: object
+      additionalProperties: false
       properties:
-        prompt:
-          type: string
-          description: User message (alias 'message' also supported by server)
-        message:
-          type: string
-          description: Back-compat for server expecting 'message'
-        session_id:
-          type: string
-          nullable: true
-        role:
-          type: string
-          nullable: true
-          enum:
-            - researcher
-            - staff
-            - director
-            - admin
-        preferences:
-          type: object
-          additionalProperties: true
-        debug:
-          type: boolean
-          default: false
-      required:
-        - message
-    ChatResponse:
-      type: object
-      required:
-        - session_id
-        - answer
-        - citations
-        - guidance_questions
-        - autosave
-        - redteam
-        - metrics
-      properties:
-        session_id:
-          type: string
-        answer:
-          type: string
-        citations:
-          type: array
-          items:
-            type: string
-        guidance_questions:
-          type: array
-          items:
-            type: string
-        autosave:
-          type: object
-          properties:
-            saved:
-              type: boolean
-            items:
-              type: array
-              items:
-                type: object
-        redteam:
-          type: object
-          additionalProperties: true
-        metrics:
-          type: object
-          properties:
-            tokens:
-              type: integer
-              nullable: true
-            latency_ms:
-              type: integer
-              nullable: true
-    IngestBatchRequest:
-      type: object
-      required:
-        - items
-      properties:
-        items:
-          type: array
-          items:
-            type: object
-            required:
-              - text
-              - type
-            properties:
-              user_email:
-                type: string
-                nullable: true
-              text:
-                type: string
-              type:
-                type: string
-                enum:
-                  - semantic
-                  - episodic
-                  - procedural
-              title:
-                type: string
-                nullable: true
-              tags:
-                type: array
-                items:
-                  type: string
-              source:
-                type: string
-                nullable: true
-              role_view:
-                type: array
-                items:
-                  type: string
-    MemoryUpsert:
-      type: object
-      required:
-        - type
-        - text
-      properties:
-        type:
-          type: string
-          enum:
-            - semantic
-            - episodic
-            - procedural
-        title:
-          type: string
-          nullable: true
-        text:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-        role_view:
-          type: array
-          items:
-            type: string
+        user_email: { type: string }
+        title: { type: string }
+        text: { type: string }
+        type: { type: string, enum: [semantic, episodic, procedural] }
+        tags: { type: array, items: { type: string } }
+        source: { type: string }
+        role_view: { type: array, items: { type: string } }
+        file_id: { type: string }
+        session_id: { type: string }
+        dedupe: { type: boolean }
+      required: [text, type]
