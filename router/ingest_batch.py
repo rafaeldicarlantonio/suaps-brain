@@ -4,8 +4,7 @@ import os
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Header, HTTPException, Body
 
-# Use the single-item ingest used by /upload (this path is known-good)
-from agent.ingest import ingest_text
+from agent.ingest import ingest_text  # known-good single-item path
 
 router = APIRouter(tags=["ingest"])
 
@@ -18,52 +17,49 @@ def _require_key(x_api_key: Optional[str]):
     if not x_api_key or x_api_key != want:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-def _normalize_payload(payload: Any) -> (List[Dict[str, Any]], bool):
+def _normalize_payload(payload: Any) -> List[Dict[str, Any]]:
     """
-    Accept either:
-    - {"items": [ {...}, ... ], "dedupe": true}
-    - [ {...}, ... ]
-    Also tolerate alternate field names: "documents"/"docs".
-    Each item must contain at least a 'text' (or 'content').
+    Accept shapes:
+      - {"items":[{...}, ...]}
+      - [{"title":...,"text":...}, ...]
+      - {"title":...,"text":...}
+      - "raw text"
+    Normalize to a list of {"title","text","type","tags","source","role_view","file_id"}.
     """
-    if isinstance(payload, list):
-        items = payload
-        dedupe = True
-    elif isinstance(payload, dict):
-        items = payload.get("items") or payload.get("documents") or payload.get("docs")
-        dedupe = bool(payload.get("dedupe", True))
-    else:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
-
-    if items is None:
-        raise HTTPException(status_code=400, detail="Missing 'items' array")
-
-    if not isinstance(items, list):
-        raise HTTPException(status_code=400, detail="'items' must be an array")
-
-    norm: List[Dict[str, Any]] = []
-    for it in items:
-        if not isinstance(it, dict):
-            raise HTTPException(status_code=400, detail="Each item must be an object")
-
+    def norm_item(it: Dict[str, Any]) -> Dict[str, Any]:
         text = (it.get("text") or it.get("content") or "").strip()
         if not text:
-            # Skip empty text; do not fail the whole batch
-            continue
-
-        norm.append({
+            return {}
+        return {
             "title": (it.get("title") or it.get("name") or "Untitled").strip(),
             "text": text,
-            "type": (it.get("type") or "semantic"),
+            "type": it.get("type") or "semantic",
             "tags": it.get("tags") or [],
             "source": it.get("source") or "ingest",
             "role_view": it.get("role_view"),
             "file_id": it.get("file_id"),
-        })
+        }
 
-    if not norm:
+    items: List[Dict[str, Any]] = []
+    if isinstance(payload, str):
+        items = [ {"title":"Untitled", "text": payload, "type":"semantic", "tags":[], "source":"ingest"} ]
+    elif isinstance(payload, list):
+        items = [norm_item(x) for x in payload if isinstance(x, dict)]
+    elif isinstance(payload, dict):
+        raw_items = payload.get("items") or payload.get("documents") or payload.get("docs")
+        if isinstance(raw_items, list):
+            items = [norm_item(x) for x in raw_items if isinstance(x, dict)]
+        else:
+            # treat the dict itself as a single item
+            items = [norm_item(payload)]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # prune empties and ensure at least one item with text
+    items = [x for x in items if x.get("text")]
+    if not items:
         raise HTTPException(status_code=400, detail="No valid items to ingest")
-    return norm, dedupe
+    return items
 
 @router.post("/ingest/batch")
 def ingest_batch(
@@ -72,35 +68,28 @@ def ingest_batch(
 ):
     _require_key(x_api_key)
     try:
-        items, dedupe = _normalize_payload(payload)
-
+        items = _normalize_payload(payload)
         upserted: List[Dict[str, Any]] = []
         skipped: List[Dict[str, str]] = []
 
         for it in items:
             try:
-                # Call the known-good single-item path
                 res = ingest_text(
                     text=it["text"],
                     title=it["title"],
                     type=it["type"],
                     tags=it["tags"],
                     source=it["source"],
-                    role_view=it["role_view"],
-                    file_id=it["file_id"],
-                    # If your ingest_text supports dedupe internally, it will honor it.
-                    # If not, it's still safe; Day 2 will add explicit near-dup checks.
+                    role_view=it.get("role_view"),
+                    file_id=it.get("file_id"),
                 )
-                # Normalize response shape
-                emb_id = None
-                mem_id = None
+                emb_id, mem_id = None, None
                 if isinstance(res, dict):
                     up = (res.get("upserted") or [])
                     if up and isinstance(up, list):
                         emb_id = (up[0] or {}).get("embedding_id")
                         mem_id = (up[0] or {}).get("memory_id")
                     else:
-                        # Fallbacks if ingest_text returns a direct dict
                         emb_id = res.get("embedding_id")
                         mem_id = res.get("memory_id")
                 upserted.append({"memory_id": mem_id, "embedding_id": emb_id})
