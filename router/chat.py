@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Dict, Any
+from typing import Optional
 from fastapi import APIRouter, Body, Header, HTTPException
-from pydantic import BaseModel
 
 from agent.pipeline import handle_chat
+from schemas.api import ChatRequest, ChatResponse
 
 router = APIRouter(tags=["chat"])
 
-# Simple API key guard (PRD §15)
 def _require_key(x_api_key: Optional[str]):
     want = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY")
     if os.getenv("DISABLE_AUTH","false").lower() == "true":
@@ -19,14 +18,7 @@ def _require_key(x_api_key: Optional[str]):
     if not x_api_key or x_api_key != want:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-class ChatRequest(BaseModel):
-    prompt: str
-    session_id: Optional[str] = None
-    role: Optional[str] = None
-    preferences: Optional[Dict[str, Any]] = None
-    debug: Optional[bool] = False
-
-@router.post("/chat")
+@router.post("/chat", response_model=ChatResponse)
 def chat_endpoint(
     payload: ChatRequest = Body(...),
     x_api_key: Optional[str] = Header(None),
