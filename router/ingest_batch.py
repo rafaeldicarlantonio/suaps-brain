@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Header, HTTPException, Body
 
-from agent.ingest import ingest_batch as do_ingest
-from schemas.api import IngestBatchRequest, IngestBatchResponse
+from agent.ingest import ingest_batch as do_ingest  # expects (items: List[dict], dedupe: bool)
 
 router = APIRouter(tags=["ingest"])
 
@@ -18,18 +17,67 @@ def _require_key(x_api_key: Optional[str]):
     if not x_api_key or x_api_key != want:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-@router.post("/ingest/batch", response_model=IngestBatchResponse)
+def _normalize_payload(payload: Any) -> (List[Dict[str, Any]], bool):
+    """
+    Accept either:
+    - {"items": [ {title,text,type,...}, ... ], "dedupe": true}
+    - [ {title,text,type,...}, ... ]  (top-level array)
+    Also tolerate alternate field names: "documents"/"docs".
+    """
+    if isinstance(payload, list):
+        items = payload
+        dedupe = True
+    elif isinstance(payload, dict):
+        items = payload.get("items") or payload.get("documents") or payload.get("docs")
+        dedupe = bool(payload.get("dedupe", True))
+    else:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if items is None:
+        raise HTTPException(status_code=400, detail="Missing 'items' array")
+
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="'items' must be an array")
+
+    # minimal normalization of each item
+    norm: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail="Each item must be an object")
+        title = it.get("title") or it.get("name") or "Untitled"
+        text = it.get("text") or it.get("content")
+        mtype = it.get("type") or "semantic"
+        if not text:
+            # skip empty text; server should not blow up
+            continue
+        norm.append({
+            "title": title,
+            "text": text,
+            "type": mtype,
+            "tags": it.get("tags") or [],
+            "source": it.get("source") or "ingest",
+            "role_view": it.get("role_view"),
+            "file_id": it.get("file_id"),
+        })
+    if not norm:
+        raise HTTPException(status_code=400, detail="No valid items to ingest")
+    return norm, dedupe
+
+@router.post("/ingest/batch")
 def ingest_batch(
-    payload: IngestBatchRequest = Body(...),
+    payload: Any = Body(...),
     x_api_key: Optional[str] = Header(None),
 ):
     _require_key(x_api_key)
     try:
-        res = do_ingest([i.model_dump() for i in payload.items], dedupe=bool(payload.dedupe))
-        # coerce to response model shape
-        return IngestBatchResponse(
-            upserted=[{"memory_id": u.get("memory_id"), "embedding_id": u.get("embedding_id")} for u in res.get("upserted", [])],
-            skipped=[{"reason": s.get("reason", "unknown")} for s in res.get("skipped", [])],
-        )
+        items, dedupe = _normalize_payload(payload)
+        res = do_ingest(items, dedupe=dedupe)  # returns {"upserted":[...], "skipped":[...]}
+        # shape-guard the response
+        up = [{"memory_id": u.get("memory_id"), "embedding_id": u.get("embedding_id")} for u in (res.get("upserted") or [])]
+        sk = [{"reason": (s.get("reason") or "unknown")} for s in (res.get("skipped") or [])]
+        return {"upserted": up, "skipped": sk}
+    except HTTPException:
+        raise
     except Exception as ex:
-        raise HTTPException(status_code=500, detail=f"ingest failed: {ex}")
+        # keep message concise; don’t expose internals
+        raise HTTPException(status_code=500, detail=f"ingest failed")
