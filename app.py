@@ -7,30 +7,40 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 # ✅ Import the APIRouter object directly
-from router.ingest_batch import router as ingest_router
-
-# Optional routers (still safe to guard)
+# --- Router mounting with explicit logging -----------------------------------
 try:
-    from router.upload import router as upload_router
-except Exception:
-    upload_router = None
+    from router.ingest_batch import router as ingest_router
+    app.include_router(ingest_router)
+    print("[mount] /ingest/batch mounted")
+except Exception as ex:
+    print(f"[mount] ingest router NOT mounted: {ex}")
+
 try:
     from router.chat import router as chat_router
-except Exception:
-    chat_router = None
+    app.include_router(chat_router)
+    print("[mount] /chat mounted")
+except Exception as ex:
+    print(f"[mount] chat router NOT mounted: {ex}")
+
+try:
+    from router.upload import router as upload_router
+    app.include_router(upload_router)
+    print("[mount] /upload mounted")
+except Exception as ex:
+    print(f"[mount] upload router NOT mounted: {ex}")
+
 try:
     from router.debug import router as debug_router
-except Exception:
-    debug_router = None
+    app.include_router(debug_router)
+    print("[mount] /debug mounted")
+except Exception as ex:
+    print(f"[mount] debug router NOT mounted: {ex}")
 
-# Optional project modules (fail-safe imports)
-try:
-    from agent import store, retrieval
-    from agent.ingest import distill_chunk
-except Exception:
-    store = None
-    retrieval = None
-    distill_chunk = None
+# Dump all routes at startup so we can verify quickly in Render logs
+@app.on_event("startup")
+async def _startup_dump_routes():
+    print("[routes]", [r.path for r in app.routes])
+e
 
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
 
