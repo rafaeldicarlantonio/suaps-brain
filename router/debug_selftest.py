@@ -1,12 +1,13 @@
 from __future__ import annotations
 import time
 from fastapi import APIRouter
+from schemas.api import DebugSelftestResponse
 from vendors.openai_client import client, EMBED_MODEL
 from vendors.pinecone_client import get_index
 
 router = APIRouter(tags=["debug"])
 
-@router.get("/debug/selftest")
+@router.get("/debug/selftest", response_model=DebugSelftestResponse)
 def selftest():
     t0=time.time()
     e = client.embeddings.create(model=EMBED_MODEL, input="ping").data[0].embedding
@@ -15,7 +16,7 @@ def selftest():
     try:
         idx.query(vector=e, top_k=1, namespace="semantic")
         pine_ok = True
-    except Exception as ex:
+    except Exception:
         pine_ok = False
     return {
         "openai_ms": int((pine_t - t0)*1000),
