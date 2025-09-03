@@ -316,10 +316,11 @@ def ingest_text(
         # INSERT memory row
         try:
             ins = supabase.table("memories").insert({
-    "user_id": uid,                         # <-- REQUIRED by your schema
+    "user_id": uid,                          # required by your schema
     "type": type,
     "title": ctitle,
-    "text": ctext,
+    "text": ctext,                           # original text field
+    "value": ctext,                          # <-- NEW: your DB requires this NOT NULL
     "tags": ctags,
     "source": source or "ingest",
     "file_id": file_id,
@@ -328,6 +329,7 @@ def ingest_text(
     "dedupe_hash": dh,
     "created_at": datetime.utcnow().isoformat()
 }).execute()
+
 
             mem_id = ins.data[0]["id"]
         except Exception as ex:
