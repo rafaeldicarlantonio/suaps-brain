@@ -1,24 +1,30 @@
-# router/debug.py
+from __future__ import annotations
 import os
 from typing import Optional
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from vendors.supabase_client import supabase
 
-router = APIRouter()
+router = APIRouter(tags=["debug"])
 
-def auth(x_api_key: Optional[str]):
-    want = os.getenv("ACTIONS_API_KEY") or "dev_key"
-    if (os.getenv("DISABLE_AUTH","false").lower() == "true"):
+def _require_key(x_api_key: Optional[str]):
+    want = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY")
+    if os.getenv("DISABLE_AUTH","false").lower() == "true":
         return
+    if not want:
+        raise HTTPException(status_code=500, detail="Server missing X_API_KEY")
     if not x_api_key or x_api_key != want:
-        raise HTTPException(status_code=401, detail="invalid X-API-Key")
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 @router.get("/debug/memories")
-def debug_memories(x_api_key: Optional[str] = Header(None), limit: int = 20, type: Optional[str] = None):
-    auth(x_api_key)
-    q = supabase.table("memories").select("*").order("created_at", desc=True).limit(limit)
+def debug_memories(
+    x_api_key: Optional[str] = Header(None),
+    type: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    _require_key(x_api_key)
+    q = supabase.table("memories").select("id,type,title,created_at").order("created_at", desc=True).limit(limit)
     if type:
         q = q.eq("type", type)
     r = q.execute()
-    out = [{"id": row["id"], "type": row.get("type"), "title": row.get("title"), "tags": row.get("tags"), "created_at": row.get("created_at")} for row in (r.data or [])]
+    out = [{"id": row["id"], "type": row.get("type"), "title": row.get("title"), "created_at": row.get("created_at")} for row in (r.data or [])]
     return {"items": out}
