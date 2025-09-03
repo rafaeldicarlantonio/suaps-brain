@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, List
 from hashlib import sha256
 from vendors.supabase_client import supabase
+from postgrest.exceptions import APIError
 
 def ensure_session(session_id: Optional[str], title: Optional[str]) -> Dict[str,Any]:
     if session_id:
@@ -33,17 +34,27 @@ def find_memory_by_dedupe_hash(dh: str) -> Optional[Dict[str,Any]]:
 
 def insert_memory(mem: Optional[Dict[str,Any]] = None, **kwargs) -> Dict[str,Any]:
     """
-    Accepts either a dict or keyword args (for compatibility with older callers).
-    Example:
-        insert_memory({"type":"semantic", ...})
-        insert_memory(type="semantic", title="...", text="...", tags=[], source="api", role_view=[])
+    Accept dict or kwargs; if DB enforces user_id NOT NULL, retry with DEFAULT_USER_ID.
     """
     if mem is None:
         mem = {}
     if kwargs:
         mem.update(kwargs)
-    r = supabase.table("memories").insert(mem).execute()
-    return r.data[0]
+
+    try:
+        r = supabase.table("memories").insert(mem).execute()
+        return r.data[0]
+    except APIError as ex:
+        msg = (getattr(ex, "message", "") or "").lower()
+        if "user_id" in msg and "not-null" in msg or "not null" in msg:
+            default_user = os.getenv("SUPABASE_DEFAULT_USER_ID")
+            if not default_user:
+                raise  # no fallback available
+            mem2 = dict(mem)
+            mem2["user_id"] = default_user
+            r = supabase.table("memories").insert(mem2).execute()
+            return r.data[0]
+        raise
 
 
 def upsert_memory(mem: Dict[str,Any]) -> Dict[str,Any]:
