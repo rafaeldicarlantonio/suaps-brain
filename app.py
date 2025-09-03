@@ -1,7 +1,8 @@
 import os
 import uuid
 from typing import Optional, List, Dict
-
+import time
+from starlette.requests import Request
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -32,10 +33,8 @@ except Exception:
     distill_chunk = None
 
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
-# add near the imports
-import time
-from starlette.requests import Request
 
+# Minimal request logger (prints one line per request)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     t0 = time.time()
