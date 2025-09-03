@@ -2,7 +2,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, Query
+
 from vendors.supabase_client import supabase
+from schemas.api import DebugMemoriesResponse
 
 router = APIRouter(tags=["debug"])
 
@@ -15,7 +17,7 @@ def _require_key(x_api_key: Optional[str]):
     if not x_api_key or x_api_key != want:
         raise HTTPException(status_code=401, detail="unauthorized")
 
-@router.get("/debug/memories")
+@router.get("/debug/memories", response_model=DebugMemoriesResponse)
 def debug_memories(
     x_api_key: Optional[str] = Header(None),
     type: Optional[str] = Query(None),
