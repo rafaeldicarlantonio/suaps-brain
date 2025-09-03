@@ -36,11 +36,6 @@ try:
 except Exception as ex:
     print(f"[mount] debug router NOT mounted: {ex}")
 
-# Dump all routes at startup so we can verify quickly in Render logs
-@app.on_event("startup")
-async def _startup_dump_routes():
-    print("[routes]", [r.path for r in app.routes])
-e
 
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
 
@@ -56,6 +51,11 @@ async def log_requests(request: Request, call_next):
 @app.get("/debug/routes")
 def list_routes():
     return {"routes": [r.path for r in app.routes]}
+    # Dump all routes at startup so we can verify quickly in Render logs
+@app.on_event("startup")
+async def _startup_dump_routes():
+    print("[routes]", [r.path for r in app.routes])
+
 # 1) Open POST endpoint with NO auth, NO schema
 @app.post("/debug/echo", include_in_schema=True)
 def debug_echo(payload: dict | None = None):
