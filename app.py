@@ -22,6 +22,7 @@ from router.ingest_batch import router as ingest_router
 from router.debug import router as debug_router
 from router.debug_selftest import router as selftest_router
 from router.memories import router as memories_router
+from schemas.api import HealthzResponse
 
 app.include_router(chat_router)
 app.include_router(upload_router)
@@ -31,27 +32,24 @@ app.include_router(selftest_router)
 app.include_router(memories_router)
 
 # Healthz (PRD §5.5)
-@app.get("/healthz")
+@app.get("/healthz", response_model=HealthzResponse)
 def healthz():
     out = {"status":"ok"}
     # OpenAI
     try:
         from vendors.openai_client import client, CHAT_MODEL
-        client.models.list()  # cheap call; will raise if bad key
+        client.models.list()
         out["openai"] = {"ok": True, "chat_model": CHAT_MODEL}
     except Exception as ex:
         out["openai"] = {"ok": False, "error": str(ex)}
-
     # Pinecone
     try:
         from vendors.pinecone_client import get_index, INDEX_NAME
         idx = get_index()
-        # lightweight op
         _ = getattr(idx, "describe_index_stats")(None) if hasattr(idx, "describe_index_stats") else {}
         out["pinecone"] = {"ok": True, "index": INDEX_NAME}
     except Exception as ex:
         out["pinecone"] = {"ok": False, "error": str(ex)}
-
     # Supabase
     try:
         from vendors.supabase_client import supabase
@@ -59,5 +57,4 @@ def healthz():
         out["supabase"] = {"ok": True, "count": len(r.data or [])}
     except Exception as ex:
         out["supabase"] = {"ok": False, "error": str(ex)}
-
     return out
