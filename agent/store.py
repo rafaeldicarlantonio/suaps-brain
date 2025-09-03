@@ -31,9 +31,20 @@ def find_memory_by_dedupe_hash(dh: str) -> Optional[Dict[str,Any]]:
     r = supabase.table("memories").select("*").eq("dedupe_hash", dh).limit(1).execute()
     return (r.data or [None])[0]
 
-def insert_memory(mem: Dict[str,Any]) -> Dict[str,Any]:
+def insert_memory(mem: Optional[Dict[str,Any]] = None, **kwargs) -> Dict[str,Any]:
+    """
+    Accepts either a dict or keyword args (for compatibility with older callers).
+    Example:
+        insert_memory({"type":"semantic", ...})
+        insert_memory(type="semantic", title="...", text="...", tags=[], source="api", role_view=[])
+    """
+    if mem is None:
+        mem = {}
+    if kwargs:
+        mem.update(kwargs)
     r = supabase.table("memories").insert(mem).execute()
     return r.data[0]
+
 
 def upsert_memory(mem: Dict[str,Any]) -> Dict[str,Any]:
     dh = mem.get("dedupe_hash")
