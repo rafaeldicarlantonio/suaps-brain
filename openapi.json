@@ -1,1 +1,256 @@
-{"openapi":"3.1.0","info":{"title":"SUAPS Brain","version":"0.1.0"},"paths":{"/chat":{"post":{"tags":["chat"],"summary":"Chat Endpoint","operationId":"chat_endpoint_chat_post","parameters":[{"name":"x-api-key","in":"header","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"X-Api-Key"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ChatRequest"}}}},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ChatResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/upload":{"post":{"tags":["upload"],"summary":"Upload","operationId":"upload_upload_post","parameters":[{"name":"x-api-key","in":"header","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"X-Api-Key"}}],"requestBody":{"required":true,"content":{"multipart/form-data":{"schema":{"$ref":"#/components/schemas/Body_upload_upload_post"}}}},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/ingest/batch":{"post":{"tags":["ingest"],"summary":"Ingest Batch","operationId":"ingest_batch_ingest_batch_post","parameters":[{"name":"x-api-key","in":"header","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"X-Api-Key"}}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":true,"title":"Payload"}}}},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/debug/memories":{"get":{"tags":["debug"],"summary":"Debug Memories","operationId":"debug_memories_debug_memories_get","parameters":[{"name":"type","in":"query","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Type"}},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","maximum":100,"minimum":1,"default":20,"title":"Limit"}},{"name":"x-api-key","in":"header","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"X-Api-Key"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/debug/selftest":{"get":{"tags":["debug"],"summary":"Selftest","operationId":"selftest_debug_selftest_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/memories/upsert":{"post":{"summary":"Memories Upsert","operationId":"memories_upsert_memories_upsert_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/MemoryUpsert"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/healthz":{"get":{"summary":"Healthz","operationId":"healthz_healthz_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}}},"components":{"schemas":{"AutosaveItem":{"properties":{"memory_id":{"type":"string","title":"Memory Id"},"type":{"type":"string","title":"Type"},"title":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Title"}},"type":"object","required":["memory_id","type"],"title":"AutosaveItem"},"AutosaveResult":{"properties":{"saved":{"type":"boolean","title":"Saved"},"items":{"items":{"$ref":"#/components/schemas/AutosaveItem"},"type":"array","title":"Items","default":[]}},"type":"object","required":["saved"],"title":"AutosaveResult"},"Body_upload_upload_post":{"properties":{"file":{"type":"string","format":"binary","title":"File"},"tags":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Tags"}},"type":"object","required":["file"],"title":"Body_upload_upload_post"},"ChatRequest":{"properties":{"prompt":{"type":"string","title":"Prompt"},"session_id":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Session Id"},"role":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Role"},"preferences":{"anyOf":[{"additionalProperties":true,"type":"object"},{"type":"null"}],"title":"Preferences"},"debug":{"anyOf":[{"type":"boolean"},{"type":"null"}],"title":"Debug","default":false}},"type":"object","required":["prompt"],"title":"ChatRequest"},"ChatResponse":{"properties":{"session_id":{"type":"string","title":"Session Id"},"answer":{"type":"string","title":"Answer"},"citations":{"items":{"type":"string"},"type":"array","title":"Citations"},"guidance_questions":{"items":{"type":"string"},"type":"array","title":"Guidance Questions"},"autosave":{"$ref":"#/components/schemas/AutosaveResult"},"redteam":{"$ref":"#/components/schemas/RedteamResult"},"metrics":{"additionalProperties":true,"type":"object","title":"Metrics"}},"type":"object","required":["session_id","answer","citations","guidance_questions","autosave","redteam","metrics"],"title":"ChatResponse"},"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"MemoryUpsert":{"properties":{"type":{"type":"string","title":"Type"},"title":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Title"},"text":{"type":"string","title":"Text"},"tags":{"anyOf":[{"items":{"type":"string"},"type":"array"},{"type":"null"}],"title":"Tags","default":[]},"role_view":{"anyOf":[{"items":{"type":"string"},"type":"array"},{"type":"null"}],"title":"Role View","default":[]}},"type":"object","required":["type","text"],"title":"MemoryUpsert"},"RedteamResult":{"properties":{"action":{"type":"string","title":"Action"},"reasons":{"items":{"type":"string"},"type":"array","title":"Reasons","default":[]}},"type":"object","required":["action"],"title":"RedteamResult"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SUAPS Brain",
+    "version": "0.1.0"
+  },
+
+  "servers": [
+    { "url": "https://suaps-brain.onrender.com" }
+  ],
+
+  "security": [
+    { "ApiKeyAuth": [] }
+  ],
+
+  "paths": {
+    "/chat": {
+      "post": {
+        "summary": "Chat",
+        "operationId": "chat_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ChatRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ChatResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload": {
+      "post": {
+        "summary": "Upload",
+        "operationId": "upload_upload_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UploadResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ingest/batch": {
+      "post": {
+        "summary": "Ingest Batch",
+        "operationId": "ingest_batch_ingest_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/IngestBatchRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IngestBatchResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/memories/upsert": {
+      "post": {
+        "summary": "Memories Upsert",
+        "operationId": "memories_upsert_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MemoriesUpsertRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MemoriesUpsertResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/memories": {
+      "get": {
+        "summary": "Debug Memories",
+        "operationId": "debug_memories_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DebugMemoriesResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/selftest": {
+      "get": {
+        "summary": "Debug Selftest",
+        "operationId": "debug_selftest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DebugSelftestResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Healthz",
+        "operationId": "healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthzResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    },
+    "schemas": {
+      "ChatRequest": {
+        "type": "object",
+        "properties": {
+          "prompt": { "type": "string" },
+          "session_id": { "type": "string" },
+          "role": { "type": "string" },
+          "preferences": { "type": "object" },
+          "debug": { "type": "boolean" }
+        },
+        "required": ["prompt"]
+      },
+      "ChatResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": { "type": "string" },
+          "answer": { "type": "string" },
+          "citations": { "type": "array", "items": { "type": "string" } },
+          "guidance_questions": { "type": "array", "items": { "type": "string" } },
+          "autosave": { "type": "object" },
+          "redteam": { "type": "object" },
+          "metrics": { "type": "object" }
+        },
+        "required": ["session_id", "answer"]
+      },
+      "UploadResponse": {
+        "type": "object",
+        "properties": {
+          "file_id": { "type": "string" },
+          "bytes": { "type": "integer" },
+          "mime_type": { "type": "string" },
+          "ingest_job_id": { "type": "string" }
+        },
+        "required": ["file_id", "bytes", "mime_type"]
+      },
+      "IngestBatchRequest": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "type": "object" } },
+          "dedupe": { "type": "boolean" }
+        },
+        "required": ["items"]
+      },
+      "IngestBatchResponse": {
+        "type": "object",
+        "properties": {
+          "upserted": { "type": "array", "items": { "type": "object" } },
+          "skipped": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "MemoriesUpsertRequest": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "title": { "type": "string" },
+          "text": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "role_view": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["type", "text"]
+      },
+      "MemoriesUpsertResponse": {
+        "type": "object",
+        "properties": {
+          "memory_id": { "type": "string" },
+          "embedding_id": { "type": "string" }
+        },
+        "required": ["memory_id"]
+      },
+      "DebugMemoriesResponse": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "DebugSelftestResponse": {
+        "type": "object",
+        "properties": {
+          "openai_ms": { "type": "integer" },
+          "pinecone_ok": { "type": "boolean" },
+          "latency_ms": { "type": "integer" }
+        },
+        "required": ["openai_ms", "pinecone_ok", "latency_ms"]
+      },
+      "HealthzResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "openai": { "type": "object" },
+          "pinecone": { "type": "object" },
+          "supabase": { "type": "object" }
+        },
+        "required": ["status", "openai", "pinecone", "supabase"]
+      }
+    }
+  }
+}
