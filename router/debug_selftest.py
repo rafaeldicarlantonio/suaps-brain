@@ -1,19 +1,24 @@
-# router/debug_selftest.py
-from fastapi import APIRouter
+from __future__ import annotations
 import time
+from fastapi import APIRouter
 from vendors.openai_client import client, EMBED_MODEL
-from vendors.pinecone_client import INDEX
+from vendors.pinecone_client import get_index
 
-router = APIRouter()
+router = APIRouter(tags=["debug"])
 
 @router.get("/debug/selftest")
 def selftest():
     t0=time.time()
+    e = client.embeddings.create(model=EMBED_MODEL, input="ping").data[0].embedding
+    pine_t = time.time()
+    idx = get_index()
     try:
-        e = client.embeddings.create(model=EMBED_MODEL, input="ping").data[0].embedding
-        pine_t = time.time()
-        INDEX.query(vector=e, top_k=1, namespace="semantic")
-        pine_lat = int((time.time()-pine_t)*1000)
-        return {"ok":True,"latency_ms":int((time.time()-t0)*1000),"pinecone_ms":pine_lat}
+        idx.query(vector=e, top_k=1, namespace="semantic")
+        pine_ok = True
     except Exception as ex:
-        return {"ok":False,"error":str(ex),"latency_ms":int((time.time()-t0)*1000)}
+        pine_ok = False
+    return {
+        "openai_ms": int((pine_t - t0)*1000),
+        "pinecone_ok": pine_ok,
+        "latency_ms": int((time.time()-t0)*1000),
+    }
