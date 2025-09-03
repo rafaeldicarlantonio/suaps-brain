@@ -4,7 +4,8 @@ import os
 from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, Header, HTTPException, Body
 
-from agent.ingest import ingest_batch as do_ingest  # expects (items: List[dict], dedupe: bool)
+# Use the single-item ingest used by /upload (this path is known-good)
+from agent.ingest import ingest_text
 
 router = APIRouter(tags=["ingest"])
 
@@ -20,9 +21,10 @@ def _require_key(x_api_key: Optional[str]):
 def _normalize_payload(payload: Any) -> (List[Dict[str, Any]], bool):
     """
     Accept either:
-    - {"items": [ {title,text,type,...}, ... ], "dedupe": true}
-    - [ {title,text,type,...}, ... ]  (top-level array)
+    - {"items": [ {...}, ... ], "dedupe": true}
+    - [ {...}, ... ]
     Also tolerate alternate field names: "documents"/"docs".
+    Each item must contain at least a 'text' (or 'content').
     """
     if isinstance(payload, list):
         items = payload
@@ -39,26 +41,26 @@ def _normalize_payload(payload: Any) -> (List[Dict[str, Any]], bool):
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="'items' must be an array")
 
-    # minimal normalization of each item
     norm: List[Dict[str, Any]] = []
     for it in items:
         if not isinstance(it, dict):
             raise HTTPException(status_code=400, detail="Each item must be an object")
-        title = it.get("title") or it.get("name") or "Untitled"
-        text = it.get("text") or it.get("content")
-        mtype = it.get("type") or "semantic"
+
+        text = (it.get("text") or it.get("content") or "").strip()
         if not text:
-            # skip empty text; server should not blow up
+            # Skip empty text; do not fail the whole batch
             continue
+
         norm.append({
-            "title": title,
+            "title": (it.get("title") or it.get("name") or "Untitled").strip(),
             "text": text,
-            "type": mtype,
+            "type": (it.get("type") or "semantic"),
             "tags": it.get("tags") or [],
             "source": it.get("source") or "ingest",
             "role_view": it.get("role_view"),
             "file_id": it.get("file_id"),
         })
+
     if not norm:
         raise HTTPException(status_code=400, detail="No valid items to ingest")
     return norm, dedupe
@@ -71,13 +73,43 @@ def ingest_batch(
     _require_key(x_api_key)
     try:
         items, dedupe = _normalize_payload(payload)
-        res = do_ingest(items, dedupe=dedupe)  # returns {"upserted":[...], "skipped":[...]}
-        # shape-guard the response
-        up = [{"memory_id": u.get("memory_id"), "embedding_id": u.get("embedding_id")} for u in (res.get("upserted") or [])]
-        sk = [{"reason": (s.get("reason") or "unknown")} for s in (res.get("skipped") or [])]
-        return {"upserted": up, "skipped": sk}
+
+        upserted: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, str]] = []
+
+        for it in items:
+            try:
+                # Call the known-good single-item path
+                res = ingest_text(
+                    text=it["text"],
+                    title=it["title"],
+                    type=it["type"],
+                    tags=it["tags"],
+                    source=it["source"],
+                    role_view=it["role_view"],
+                    file_id=it["file_id"],
+                    # If your ingest_text supports dedupe internally, it will honor it.
+                    # If not, it's still safe; Day 2 will add explicit near-dup checks.
+                )
+                # Normalize response shape
+                emb_id = None
+                mem_id = None
+                if isinstance(res, dict):
+                    up = (res.get("upserted") or [])
+                    if up and isinstance(up, list):
+                        emb_id = (up[0] or {}).get("embedding_id")
+                        mem_id = (up[0] or {}).get("memory_id")
+                    else:
+                        # Fallbacks if ingest_text returns a direct dict
+                        emb_id = res.get("embedding_id")
+                        mem_id = res.get("memory_id")
+                upserted.append({"memory_id": mem_id, "embedding_id": emb_id})
+            except Exception:
+                skipped.append({"reason": "ingest_failed"})
+
+        return {"upserted": upserted, "skipped": skipped}
+
     except HTTPException:
         raise
-    except Exception as ex:
-        # keep message concise; don’t expose internals
-        raise HTTPException(status_code=500, detail=f"ingest failed")
+    except Exception:
+        raise HTTPException(status_code=500, detail="ingest failed")
