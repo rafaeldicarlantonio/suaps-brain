@@ -46,6 +46,20 @@ async def log_requests(request: Request, call_next):
 @app.get("/debug/routes")
 def list_routes():
     return {"routes": [r.path for r in app.routes]}
+# 1) Open POST endpoint with NO auth, NO schema
+@app.post("/debug/echo", include_in_schema=True)
+def debug_echo(payload: dict | None = None):
+    return {"ok": True, "echo": payload or {}}
+
+# 2) Auth-required GET (ensures the platform can attach the key)
+from fastapi import Header
+@app.get("/debug/needkey")
+def debug_needkey(x_api_key: str | None = Header(None)):
+    # read configured server key
+    want = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY")
+    if not want or x_api_key != want:
+        raise HTTPException(status_code=401, detail="missing/invalid X-API-Key")
+    return {"ok": True}
 
 # ✅ Mount routers unconditionally for ingest; guarded for the optional ones
 app.include_router(ingest_router)        # <-- exposes POST /ingest/batch
