@@ -4,17 +4,6 @@ from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
-# add near the imports
-import time
-from starlette.requests import Request
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    t0 = time.time()
-    resp = await call_next(request)
-    dt = int((time.time() - t0) * 1000)
-    print(f"[HTTP] {request.method} {request.url.path} -> {resp.status_code} in {dt}ms")
-    return resp
 
 # ✅ Import the APIRouter object directly
 from router.ingest_batch import router as ingest_router
@@ -43,7 +32,17 @@ except Exception:
     distill_chunk = None
 
 app = FastAPI(title="SUAPS Brain API", version="1.0.0")
+# add near the imports
+import time
+from starlette.requests import Request
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    t0 = time.time()
+    resp = await call_next(request)
+    dt = int((time.time() - t0) * 1000)
+    print(f"[HTTP] {request.method} {request.url.path} -> {resp.status_code} in {dt}ms")
+    return resp
 # Handy route list to verify mounts
 @app.get("/debug/routes")
 def list_routes():
