@@ -210,3 +210,26 @@ async def memories_upsert_alias(request: Request, x_api_key: Optional[str] = Hea
 @router.post("/memories/upsert/", include_in_schema=False)
 async def memories_upsert_slash(request: Request, x_api_key: Optional[str] = Header(None)):
     return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
+
+from fastapi import Path
+
+@router.get("/memories/{memory_id}")
+def get_memory(memory_id: str = Path(...), x_api_key: Optional[str] = Header(None)):
+    expected = os.getenv("X_API_KEY")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    from vendors.supabase_client import get_client
+    sb = get_client()
+    text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or "text").strip().lower()
+    cols = f"id,type,title,tags,role_view,source,created_at,updated_at,embedding_id,{text_col}"
+    rs = sb.table("memories").select(cols).eq("id", memory_id).limit(1).execute()
+    data = rs.data if hasattr(rs, "data") else rs.get("data")
+    if not data:
+        raise HTTPException(status_code=404, detail="memory not found")
+
+    row = data[0]
+    # normalize API shape: always return "text" key regardless of DB column name
+    row["text"] = row.pop(text_col, None)
+    return row
+
