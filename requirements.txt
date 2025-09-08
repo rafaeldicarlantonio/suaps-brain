@@ -23,6 +23,9 @@ python-docx>=1.1.0
 simhash>=2.1.2
 python-multipart>=0.0.9
 tiktoken>=0.7.0
+readability-lxml>=0.8.1
+beautifulsoup4>=4.12.3
+lxml>=5.2.2
 
 # Optional OCR stack (guarded by env flags)
 pytesseract>=0.3.10
