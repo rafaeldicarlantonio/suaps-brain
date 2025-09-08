@@ -1,89 +1,198 @@
-from __future__ import annotations
+# router/memories.py
+from typing import Optional, List, Dict, Any
+import os, re, hashlib, datetime
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
-import os, hashlib
-from typing import Optional, List
-from fastapi import APIRouter, Header, HTTPException, Body
-from pydantic import BaseModel
+router = APIRouter()
 
-from agent import store
-from vendors.openai_client import client, EMBED_MODEL
-from vendors.pinecone_client import get_index
+_ALLOWED_TYPES = {"episodic", "semantic", "procedural"}
 
-router = APIRouter(tags=["memories"])
+def _norm_text(s: str) -> str:
+    s = s or ""
+    # normalize whitespace and strip page headers-like numbers
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\s+\n", "\n", s).strip()
+    return s
 
-def _require_key(x_api_key: Optional[str]):
-    want = os.getenv("X_API_KEY") or os.getenv("ACTIONS_API_KEY")
-    if os.getenv("DISABLE_AUTH","false").lower() == "true":
-        return
-    if not want:
-        raise HTTPException(status_code=500, detail="Server missing X_API_KEY")
-    if not x_api_key or x_api_key != want:
-        raise HTTPException(status_code=401, detail="unauthorized")
+def _to_tags(v: Any) -> List[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [t.strip() for t in v.split(",") if t.strip()]
+    return []
 
-class MemoriesUpsertBody(BaseModel):
-    type: str  # 'episodic' | 'semantic' | 'procedural'
-    title: Optional[str] = None
-    text: str
-    tags: Optional[List[str]] = None
-    role_view: Optional[List[str]] = None
+def _to_roles(v: Any) -> List[str]:
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [r.strip() for r in v.split(",") if r.strip()]
+    return []
 
-def _embed(text: str):
-    return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+def _namespace_for(mem_type: str) -> str:
+    # PRD namespaces map 1:1 with type
+    return {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}.get(mem_type, "semantic")
+
+def _source_of(v: Any) -> str:
+    s = (v or "").strip().lower()
+    return s if s in {"upload","ingest","chat","wiki"} else "ingest"
+
+def _now_iso() -> str:
+    return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
 @router.post("/memories/upsert")
-def memories_upsert(
-    body: MemoriesUpsertBody = Body(...),
+async def memories_upsert_endpoint(
+    request: Request,
     x_api_key: Optional[str] = Header(None),
 ):
-    _require_key(x_api_key)
+    """
+    Minimal working upsert:
+    1) Validate + normalize payload
+    2) Insert memory row (or return existing via dedupe_hash)
+    3) Create embedding (best-effort)
+    4) Upsert in Pinecone with metadata (best-effort)
+    5) Update memories.embedding_id (if vector inserted)
+    Returns: {"memory_id", "embedding_id", "duplicate", "pinecone_upserted", "embedded"}
+    """
+    # --- optional simple auth ---
+    expected = os.getenv("X_API_KEY")
+    if expected and x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Normalize + dedupe hash
-    norm_text = " ".join((body.text or "").split()).strip()
-    if not norm_text:
-        raise HTTPException(status_code=400, detail="text is required")
-    dedupe_hash = hashlib.sha256(norm_text.encode("utf-8")).hexdigest()
-
-    # Upsert memory row (dedupe by hash)
-    existing = store.find_memory_by_dedupe_hash(dedupe_hash)
-    if existing:
-        # Already exists; return what we have
-        return {
-            "memory_id": existing["id"],
-            "embedding_id": existing.get("embedding_id"),
-        }
-
-    # Insert new memory
-    mem_row = store.insert_memory(
-        type=body.type,
-        title=body.title or "",
-        text=norm_text,
-        tags=body.tags or [],
-        source="api",
-        role_view=body.role_view or [],
-        dedupe_hash=dedupe_hash,
-    )
-
-    # Embed + Pinecone upsert
     try:
-        vec = _embed(norm_text)
-        emb_id = f"mem_{mem_row['id']}"
-        idx = get_index()
-        idx.upsert(
-            vectors=[{
-                "id": emb_id,
-                "values": vec,
-                "metadata": {
-                    "type": body.type,
-                    "title": body.title or "",
-                    "tags": body.tags or [],
-                    "source": "api",
-                }
-            }],
-            namespace=body.type,  # semantic | episodic | procedural
-        )
-        store.update_memory_embedding_id(mem_row["id"], emb_id)
-    except Exception as ex:
-        # Don’t fail the request; just return without embedding
-        emb_id = None
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Body must be a JSON object")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
-    return {"memory_id": mem_row["id"], "embedding_id": emb_id}
+    mem_type = str(payload.get("type", "")).strip().lower()
+    title = (payload.get("title") or "").strip()
+    text = _norm_text(payload.get("text") or "")
+    tags = _to_tags(payload.get("tags"))
+    role_view = _to_roles(payload.get("role_view"))
+    source = _source_of(payload.get("source"))
+
+    if mem_type not in _ALLOWED_TYPES:
+        raise HTTPException(status_code=400, detail=f"type must be one of {sorted(_ALLOWED_TYPES)}")
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required and cannot be empty")
+
+    # dedupe hash (normalized text)
+    dedupe_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    # --- Supabase insert or fetch existing ---
+    try:
+        from vendors.supabase_client import get_client
+        sb = get_client()
+    except Exception as e:
+        # Without Supabase the endpoint can't fulfill "memory" semantics
+        raise HTTPException(status_code=500, detail=f"Supabase client error: {e}")
+
+    # Check duplicate by dedupe_hash
+    try:
+        existing = sb.table("memories").select("id, embedding_id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
+        if hasattr(existing, "data"):
+            rows = existing.data
+        else:
+            rows = existing.get("data")  # client variations
+        if rows:
+            memory_id = rows[0]["id"]
+            existing_embedding = rows[0].get("embedding_id")
+            # We'll still try to embed/upsert if embedding_id is missing
+            is_duplicate = True
+        else:
+            is_duplicate = False
+            # Insert new row
+            insert_payload = {
+                "type": mem_type,
+                "title": title or None,
+                "text": text,
+                "tags": tags,
+                "source": source,
+                "role_view": role_view,
+                "dedupe_hash": dedupe_hash,
+                # created_at defaults in DB; we add updated_at via trigger in later phases
+            }
+            ins = sb.table("memories").insert(insert_payload).select("id").execute()
+            if hasattr(ins, "data"):
+                memory_id = ins.data[0]["id"]
+            else:
+                memory_id = ins["data"][0]["id"]
+            existing_embedding = None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase upsert error: {e}")
+
+    # --- Embedding (best-effort) ---
+    embedded = False
+    embedding_vec = None
+    embed_model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+    try:
+        # We embed even for duplicates if embedding_id was not set earlier
+        if (not is_duplicate) or (is_duplicate and not existing_embedding):
+            from openai import OpenAI
+            oai = OpenAI()
+            eresp = oai.embeddings.create(model=embed_model, input=text)
+            embedding_vec = eresp.data[0].embedding  # list[float]
+            embedded = True
+    except Exception as e:
+        # Keep going; we'll return embedded=False
+        embedded = False
+
+    # --- Pinecone upsert (best-effort) ---
+    pinecone_upserted = False
+    vector_id = None
+    try:
+        if embedding_vec:
+            namespace = _namespace_for(mem_type)
+            vector_id = f"mem_{memory_id}"
+            # Get index via your helper (preferred)
+            try:
+                from vendors.pinecone_client import get_index
+                index = get_index()
+            except Exception:
+                # Fallback direct client if helper not available
+                from pinecone import Pinecone
+                pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+                index = pc.Index(os.getenv("PINECONE_INDEX"))
+
+            metadata = {
+                "type": mem_type,
+                "title": title,
+                "tags": tags,
+                "created_at": _now_iso(),
+                "role_view": role_view,
+                "entity_ids": [],
+                "source": source,
+                "reason": "primary",
+            }
+            # Upsert
+            index.upsert(
+                vectors=[{"id": vector_id, "values": embedding_vec, "metadata": metadata}],
+                namespace=namespace,
+            )
+            pinecone_upserted = True
+
+            # Write back embedding_id
+            try:
+                sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
+            except Exception:
+                pass
+    except Exception:
+        pinecone_upserted = False
+
+    # --- Response ---
+    return JSONResponse(
+        {
+            "memory_id": memory_id,
+            "embedding_id": vector_id,
+            "duplicate": is_duplicate,
+            "embedded": embedded,
+            "pinecone_upserted": pinecone_upserted,
+        },
+        status_code=200,
+    )
