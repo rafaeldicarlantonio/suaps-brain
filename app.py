@@ -38,6 +38,7 @@ _mount("upload")
 _mount("ingest_batch")
 _mount("memories")        # ← the one we care about
 _mount("debug_selftest")  # or your debug router name
+_mount("search")
 
 
 # (D) Health – use root-level 'vendors/' helpers
