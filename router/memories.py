@@ -20,7 +20,7 @@ def _to_list(v: Any) -> List[str]:
 
 def _source_of(v: Any) -> str:
     s = (v or "").strip().lower()
-    return s if s in {"upload","ingest","chat","wiki"} else "ingest"
+    return s if s in {"upload","ingest","chat","wiki"} else "chat"
 
 def _now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
@@ -34,14 +34,13 @@ def _resp_data(resp) -> List[Dict[str, Any]]:
         return resp.get("data") or []
     return []
 
-# --- core logic shared by all route aliases ---
 async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> Dict[str, Any]:
-    # ---- optional simple auth ----
+    # ---- optional API key ----
     expected = os.getenv("X_API_KEY")
     if expected and x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # ---- read JSON, tolerate extra fields like 'role_metadata' ----
+    # ---- read JSON ----
     try:
         payload = await request.json()
         if not isinstance(payload, dict):
@@ -51,28 +50,30 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
 
     mem_type = str(payload.get("type", "")).strip().lower()
     title = (payload.get("title") or "").strip()
-    text = _norm_text(payload.get("text") or "")
+    # Accept either 'text' or 'value' in the request body, prefer non-empty.
+    raw_text = payload.get("value") or payload.get("text") or ""
+    text = _norm_text(raw_text)
     tags = _to_list(payload.get("tags"))
     role_view = _to_list(payload.get("role_view"))
-    _role_metadata = payload.get("role_metadata")  # tolerated/ignored for MVP
+    _role_metadata = payload.get("role_metadata")  # tolerated, ignored
     source = _source_of(payload.get("source"))
 
     if mem_type not in _ALLOWED_TYPES:
         raise HTTPException(status_code=400, detail=f"type must be one of {sorted(_ALLOWED_TYPES)}")
     if not text:
-        raise HTTPException(status_code=400, detail="text is required and cannot be empty")
+        raise HTTPException(status_code=400, detail="Either 'text' or 'value' must be provided and non-empty")
 
     dedupe_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    # ---- Supabase insert or fetch existing ----
+    # ---- Supabase client ----
     try:
         from vendors.supabase_client import get_client
         sb = get_client()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase client not available: {e}")
 
+    # ---- duplicate check ----
     try:
-        # 1) Check duplicate by dedupe_hash
         existing = sb.table("memories").select("id, embedding_id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
         rows = _resp_data(existing)
         if rows:
@@ -81,25 +82,47 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
             is_duplicate = True
         else:
             is_duplicate = False
-            insert_payload = {
+            # We don't know whether your DB column is 'text' or 'value'. Try smartly.
+            # 1) Pick default from env, else try 'text' first.
+            preferred_col = os.getenv("MEMORIES_TEXT_COLUMN", "text").strip().lower()
+            candidate_cols = [preferred_col] + (["value"] if preferred_col != "value" else []) + (["text"] if preferred_col != "text" else [])
+            # Build static parts
+            base_payload = {
                 "type": mem_type,
                 "title": title or None,
-                "text": text,
                 "tags": tags,
                 "source": source,
                 "role_view": role_view,
                 "dedupe_hash": dedupe_hash,
             }
-            # 2) INSERT (no .select() chaining; some client versions don't support it)
-            ins = sb.table("memories").insert(insert_payload).execute()
+            insert_ok = False
+            last_err = None
 
-            # 3) SELECT the freshly inserted row by dedupe_hash (portable across client versions)
+            for col in candidate_cols:
+                try:
+                    ins_payload = dict(base_payload)
+                    ins_payload[col] = text  # try with this column name
+                    sb.table("memories").insert(ins_payload).execute()
+                    insert_ok = True
+                    used_col = col
+                    break
+                except Exception as e:
+                    # Common failures we expect: "null value in column 'value'..." when we used the wrong col,
+                    # or "column 'text' does not exist" when schema differs. Try the other column next.
+                    last_err = e
+
+            if not insert_ok:
+                raise HTTPException(status_code=500, detail=f"Supabase insert failed (tried columns {candidate_cols}): {last_err}")
+
+            # Fetch the inserted row id
             fetched = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
             frows = _resp_data(fetched)
             if not frows:
                 raise RuntimeError("Insert succeeded but follow-up select returned no rows")
             memory_id = frows[0]["id"]
             existing_embedding = None
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase upsert error: {e}")
 
@@ -114,14 +137,13 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
             from openai import OpenAI
             oai = OpenAI()
             kwargs = {"model": embed_model, "input": text}
-            # Optional: keep index dimension consistent
             if os.getenv("EMBED_DIM"):
                 kwargs["dimensions"] = int(os.getenv("EMBED_DIM"))
             eresp = oai.embeddings.create(**kwargs)
             embedding_vec = eresp.data[0].embedding
             embedded = True
     except Exception:
-        embedded = False  # keep going; DB row exists
+        embedded = False  # keep going
 
     # ---- Pinecone upsert (best-effort) ----
     pinecone_upserted = False
