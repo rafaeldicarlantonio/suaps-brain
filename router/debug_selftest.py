@@ -1,13 +1,18 @@
 # router/debug_selftest.py
-import os, time, uuid
+import os
+import time
+import uuid
 from typing import Optional
-from fastapi import APIRouter, Header, HTTPException, Query
 
+from fastapi import APIRouter, Header, HTTPException, Query
 from vendors.supabase_client import get_client
 
 router = APIRouter()
 
-def _ms(t0): return int((time.time() - t0) * 1000)
+
+def _ms(t0: float) -> int:
+    return int((time.time() - t0) * 1000)
+
 
 @router.get("/debug/selftest")
 def debug_selftest(x_api_key: Optional[str] = Header(None)):
@@ -39,6 +44,7 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
     t0 = time.time()
     try:
         from openai import OpenAI
+
         oai = OpenAI()
         model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
         er = oai.embeddings.create(model=model, input="selftest probe")
@@ -49,22 +55,21 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
         out["openai_error"] = str(e)
     out["latency_ms"]["openai"] = _ms(t0)
 
-    # --- Pinecone: basic connectivity, then round-trip (upsert->fetch->delete) if we have an embedding ---
-   t0 = time.time()
+    # --- Pinecone: connectivity ---
+    t0 = time.time()
     try:
         from vendors.pinecone_client import get_index
+
         index = get_index()
         out["pinecone"] = True
     except Exception as e:
         out["pinecone_error"] = str(e)
         out["latency_ms"]["pinecone"] = _ms(t0)
         return out  # can't proceed to round-trip without an index
-
     out["latency_ms"]["pinecone"] = _ms(t0)
 
-    # Round-trip only if we have an embedding vector
+    # --- Pinecone: round-trip (upsert -> fetch -> delete) ---
     if embed_vec:
-        import uuid
         ns = os.getenv("DEBUG_NAMESPACE", "debug-selftest")
         vid = f"selftest_{uuid.uuid4().hex[:12]}"
         meta = {"reason": "selftest", "created_at": int(time.time())}
@@ -72,23 +77,22 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
         t0 = time.time()
         try:
             # Upsert
-            index.upsert(vectors=[{"id": vid, "values": embed_vec, "metadata": meta}], namespace=ns)
+            index.upsert(
+                vectors=[{"id": vid, "values": embed_vec, "metadata": meta}],
+                namespace=ns,
+            )
 
-            # Fetch (SDK compatibility: dict in older SDKs, FetchResponse in newer)
+            # Fetch (SDKs differ: dict vs FetchResponse)
             fetched = index.fetch(ids=[vid], namespace=ns)
-
-            # Normalize result
-            vectors = None
             if isinstance(fetched, dict):
-                vectors = fetched.get("vectors", {})
+                vectors = fetched.get("vectors", {}) or {}
             else:
-                # Newer SDK: object with .vectors attr (a dict)
                 vectors = getattr(fetched, "vectors", {}) or {}
 
             if isinstance(vectors, dict) and vid in vectors:
                 out["pinecone_roundtrip"] = True
 
-            # Cleanup best-effort
+            # Cleanup (best-effort)
             try:
                 index.delete(ids=[vid], namespace=ns)
             except Exception:
@@ -101,6 +105,7 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
 
     return out
 
+
 @router.get("/debug/memories")
 def debug_memories(
     limit: int = Query(20, ge=1, le=100),
@@ -112,7 +117,12 @@ def debug_memories(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     sb = get_client()
-    q = sb.table("memories").select("id,type,title,tags,created_at,embedding_id").order("created_at", desc=True).limit(limit)
+    q = (
+        sb.table("memories")
+        .select("id,type,title,tags,created_at,embedding_id")
+        .order("created_at", desc=True)
+        .limit(limit)
+    )
     if type:
         q = q.eq("type", type)
     res = q.execute()
