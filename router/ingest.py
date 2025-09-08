@@ -37,12 +37,7 @@ def ingest_batch(body: IngestBatch, x_api_key: Optional[str] = Header(None)):
         if not text:
             results["skipped"].append({"title": it.title, "reason": "empty"})
             continue
-    CHUNK_SIZE = int(os.getenv("CHUNK_SIZE","2000"))
-    CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP","200"))
-    if len(text) > CHUNK_SIZE:
-    chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
-    else:
-    chunks = [text]  # callers provide pre-chunked text; single chunk here
+        chunks = [text]  # callers provide pre-chunked text; single chunk here
         r = upsert_memories_from_chunks(
             sb=sb,
             pinecone_index=index,
