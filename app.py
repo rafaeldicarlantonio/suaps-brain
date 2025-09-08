@@ -23,17 +23,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# (C) Routers – import from top-level 'router/' package if that’s your structure
-try:
-    from router import chat, upload, ingest_batch, memories, debug_selftest
-    app.include_router(chat.router)
-    app.include_router(upload.router)
-    app.include_router(ingest_batch.router)
-    app.include_router(memories.router)
-    app.include_router(debug_selftest.router)
-except Exception as e:
-    # Keep server booting in Phase 0, even if a router is incomplete
-    print("Router load warning:", repr(e))
+# in app.py, after app = FastAPI(...)
+
+def _mount(router_module_name: str):
+    try:
+        mod = __import__(f"router.{router_module_name}", fromlist=["router"])
+        app.include_router(mod.router)
+        print(f"[routers] mounted /{router_module_name}")
+    except Exception as e:
+        print(f"[routers] WARNING: failed to mount '{router_module_name}':", repr(e))
+
+_mount("chat")
+_mount("upload")
+_mount("ingest_batch")
+_mount("memories")        # ← the one we care about
+_mount("debug_selftest")  # or your debug router name
+
 
 # (D) Health – use root-level 'vendors/' helpers
 @app.get("/healthz")
