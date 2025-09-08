@@ -1,5 +1,4 @@
-# router/memories.py
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 import os, re, hashlib, datetime
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -26,11 +25,8 @@ def _source_of(v: Any) -> str:
 def _now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
-@router.post("/memories/upsert")
-async def memories_upsert_endpoint(
-    request: Request,
-    x_api_key: Optional[str] = Header(None),
-):
+# --- core logic shared by all route aliases ---
+async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> Dict[str, Any]:
     # ---- optional simple auth ----
     expected = os.getenv("X_API_KEY")
     if expected and x_api_key != expected:
@@ -141,13 +137,28 @@ async def memories_upsert_endpoint(
     except Exception:
         pinecone_upserted = False
 
-    return JSONResponse(
-        {
-            "memory_id": memory_id,
-            "embedding_id": vector_id or existing_embedding,
-            "duplicate": is_duplicate,
-            "embedded": embedded,
-            "pinecone_upserted": pinecone_upserted,
-        },
-        status_code=200,
-    )
+    return {
+        "memory_id": memory_id,
+        "embedding_id": vector_id or existing_embedding,
+        "duplicate": is_duplicate,
+        "embedded": embedded,
+        "pinecone_upserted": pinecone_upserted,
+    }
+
+# --- canonical PRD path ---
+@router.post("/memories/upsert")
+async def memories_upsert(request: Request, x_api_key: Optional[str] = Header(None)):
+    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
+
+# --- aliases for connector-generated names (avoid 404s) ---
+@router.post("/memories_upsert_post", include_in_schema=False)
+async def memories_upsert_alias_post(request: Request, x_api_key: Optional[str] = Header(None)):
+    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
+
+@router.post("/memories_upsert", include_in_schema=False)
+async def memories_upsert_alias(request: Request, x_api_key: Optional[str] = Header(None)):
+    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
+
+@router.post("/memories/upsert/", include_in_schema=False)
+async def memories_upsert_slash(request: Request, x_api_key: Optional[str] = Header(None)):
+    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
