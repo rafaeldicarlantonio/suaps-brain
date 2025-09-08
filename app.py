@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # ---------- app.py (Phase 0 safe baseline) ----------
 
 import os
