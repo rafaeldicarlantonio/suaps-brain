@@ -50,7 +50,7 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
     out["latency_ms"]["openai"] = _ms(t0)
 
     # --- Pinecone: basic connectivity, then round-trip (upsert->fetch->delete) if we have an embedding ---
-    t0 = time.time()
+   t0 = time.time()
     try:
         from vendors.pinecone_client import get_index
         index = get_index()
@@ -64,23 +64,36 @@ def debug_selftest(x_api_key: Optional[str] = Header(None)):
 
     # Round-trip only if we have an embedding vector
     if embed_vec:
+        import uuid
         ns = os.getenv("DEBUG_NAMESPACE", "debug-selftest")
         vid = f"selftest_{uuid.uuid4().hex[:12]}"
         meta = {"reason": "selftest", "created_at": int(time.time())}
 
-        # Upsert
         t0 = time.time()
         try:
+            # Upsert
             index.upsert(vectors=[{"id": vid, "values": embed_vec, "metadata": meta}], namespace=ns)
-            # Fetch
+
+            # Fetch (SDK compatibility: dict in older SDKs, FetchResponse in newer)
             fetched = index.fetch(ids=[vid], namespace=ns)
-            if fetched and fetched.get("vectors") and vid in fetched["vectors"]:
+
+            # Normalize result
+            vectors = None
+            if isinstance(fetched, dict):
+                vectors = fetched.get("vectors", {})
+            else:
+                # Newer SDK: object with .vectors attr (a dict)
+                vectors = getattr(fetched, "vectors", {}) or {}
+
+            if isinstance(vectors, dict) and vid in vectors:
                 out["pinecone_roundtrip"] = True
-            # Cleanup (best-effort)
+
+            # Cleanup best-effort
             try:
                 index.delete(ids=[vid], namespace=ns)
             except Exception:
                 pass
+
             out["latency_ms"]["pinecone_roundtrip"] = _ms(t0)
         except Exception as e:
             out["pinecone_roundtrip_error"] = str(e)
