@@ -1,13 +1,23 @@
-from __future__ import annotations
-
+# vendors/pinecone_client.py
 import os
 from pinecone import Pinecone
 
-# One global client; requires PINECONE_API_KEY in env
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-
-INDEX_NAME = os.getenv("PINECONE_INDEX", "uap-kb")
+_pc = None
+_index = None
 
 def get_index():
-    """Return a handle to the configured index."""
-    return pc.Index(INDEX_NAME)
+    """
+    Returns a cached Pinecone Index object using PINECONE_API_KEY and PINECONE_INDEX.
+    """
+    global _pc, _index
+    if _index is not None:
+        return _index
+
+    api_key = os.getenv("PINECONE_API_KEY")
+    index_name = os.getenv("PINECONE_INDEX")
+    if not api_key or not index_name:
+        raise RuntimeError("Missing PINECONE_API_KEY or PINECONE_INDEX")
+
+    _pc = Pinecone(api_key=api_key)
+    _index = _pc.Index(index_name)
+    return _index
