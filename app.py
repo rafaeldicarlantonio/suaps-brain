@@ -35,7 +35,7 @@ def _mount(router_module_name: str):
 
 _mount("chat")
 _mount("upload")
-_mount("ingest_batch")
+_mount("ingest")
 _mount("memories")        # ← the one we care about
 _mount("debug_selftest")  # or your debug router name
 _mount("search")
