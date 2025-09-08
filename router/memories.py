@@ -25,6 +25,15 @@ def _source_of(v: Any) -> str:
 def _now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
+def _resp_data(resp) -> List[Dict[str, Any]]:
+    """Normalize supabase response .data across versions."""
+    if resp is None: return []
+    if hasattr(resp, "data"):  # supabase-py v2
+        return resp.data or []
+    if isinstance(resp, dict):  # ultra-conservative fallback
+        return resp.get("data") or []
+    return []
+
 # --- core logic shared by all route aliases ---
 async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> Dict[str, Any]:
     # ---- optional simple auth ----
@@ -45,8 +54,7 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
     text = _norm_text(payload.get("text") or "")
     tags = _to_list(payload.get("tags"))
     role_view = _to_list(payload.get("role_view"))
-    # Accept but ignore role_metadata if the connector sends it:
-    _role_metadata = payload.get("role_metadata")  # ignored for MVP
+    _role_metadata = payload.get("role_metadata")  # tolerated/ignored for MVP
     source = _source_of(payload.get("source"))
 
     if mem_type not in _ALLOWED_TYPES:
@@ -64,8 +72,9 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
         raise HTTPException(status_code=500, detail=f"Supabase client not available: {e}")
 
     try:
+        # 1) Check duplicate by dedupe_hash
         existing = sb.table("memories").select("id, embedding_id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
-        rows = existing.data if hasattr(existing, "data") else existing.get("data")
+        rows = _resp_data(existing)
         if rows:
             memory_id = rows[0]["id"]
             existing_embedding = rows[0].get("embedding_id")
@@ -81,8 +90,15 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
                 "role_view": role_view,
                 "dedupe_hash": dedupe_hash,
             }
-            ins = sb.table("memories").insert(insert_payload).select("id").execute()
-            memory_id = ins.data[0]["id"] if hasattr(ins, "data") else ins["data"][0]["id"]
+            # 2) INSERT (no .select() chaining; some client versions don't support it)
+            ins = sb.table("memories").insert(insert_payload).execute()
+
+            # 3) SELECT the freshly inserted row by dedupe_hash (portable across client versions)
+            fetched = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
+            frows = _resp_data(fetched)
+            if not frows:
+                raise RuntimeError("Insert succeeded but follow-up select returned no rows")
+            memory_id = frows[0]["id"]
             existing_embedding = None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase upsert error: {e}")
@@ -98,14 +114,14 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
             from openai import OpenAI
             oai = OpenAI()
             kwargs = {"model": embed_model, "input": text}
-            # Optional: allow EMBED_DIM to keep index dimension consistent
+            # Optional: keep index dimension consistent
             if os.getenv("EMBED_DIM"):
                 kwargs["dimensions"] = int(os.getenv("EMBED_DIM"))
             eresp = oai.embeddings.create(**kwargs)
             embedding_vec = eresp.data[0].embedding
             embedded = True
     except Exception:
-        embedded = False  # keep going; we still saved the row
+        embedded = False  # keep going; DB row exists
 
     # ---- Pinecone upsert (best-effort) ----
     pinecone_upserted = False
