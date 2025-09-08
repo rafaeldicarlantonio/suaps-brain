@@ -1,6 +1,22 @@
+# vendors/supabase_client.py
 import os
-from supabase import create_client
+from supabase import create_client, Client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+_client: Client | None = None
+
+def get_client() -> Client:
+    """
+    Returns a cached Supabase client using SERVICE_ROLE key.
+    Raises a clear error if envs are missing.
+    """
+    global _client
+    if _client is not None:
+        return _client
+
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # service role needed for server-side writes
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+
+    _client = create_client(url, key)
+    return _client
