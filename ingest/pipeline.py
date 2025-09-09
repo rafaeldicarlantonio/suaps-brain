@@ -3,6 +3,17 @@ import os, re, hashlib, datetime
 from typing import List, Dict, Any, Optional
 
 from ingest.simhash import simhash64, hamming
+# unsigned<->signed 64-bit helpers for SimHash
+_U64 = 1 << 64
+_S64 = 1 << 63
+
+def u64_to_signed(u: int) -> int:
+    """Map 0..2^64-1 into signed -2^63..2^63-1 (two's complement)."""
+    return u - _U64 if u >= _S64 else u
+
+def signed_to_u64(s: int) -> int:
+    """Map signed -2^63..2^63-1 back to 0..2^64-1."""
+    return s + _U64 if s < 0 else s
 
 def now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
