@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any, Literal
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from openai import OpenAI
+from uuid import uuid4
 
 from vendors.supabase_client import get_client
 from vendors.pinecone_client import get_index
@@ -146,10 +147,21 @@ def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None)):
 
     # 1) session
     session_id = body.session_id
-    if not session_id:
-        ins = sb.table("sessions").insert({"title": None}).execute()
-        sel = sb.table("sessions").select("id").order("created_at", desc=True).limit(1).execute()
-        session_id = (sel.data if hasattr(sel,"data") else sel.get("data") or [{}])[0].get("id")
+if not session_id:
+    # generate our own id so we don't need created_at to read it back
+    session_id = str(uuid4())
+    try:
+        # insert with explicit id
+        sb.table("sessions").insert({"id": session_id, "title": None}).execute()
+    except Exception:
+        # fallback: try insert without id and read the returned id if the client provides it
+        try:
+            ins = sb.table("sessions").insert({"title": None}).execute()
+            data = ins.data if hasattr(ins, "data") else ins.get("data") or []
+            if data and isinstance(data, list) and data[0].get("id"):
+                session_id = data[0]["id"]
+        except Exception:
+            pass
 
     # 2) working memory (last few turns) — optional analytics later
     # (We still store the current turns below.)
