@@ -1,22 +1,15 @@
 # ingest/pipeline.py
-import os, re, hashlib, datetime
+import os
+import re
+import hashlib
+import datetime
 from typing import List, Dict, Any, Optional
 
-from ingest.simhash import simhash64, hamming
+from ingest.simhash import simhash64, hamming  # expects your existing file
 
-# unsigned<->signed 64-bit helpers for SimHash
-_U64 = 1 << 64
-_S64 = 1 << 63
-
-def u64_to_signed(u: int) -> int:
-    """Map 0..2^64-1 into signed -2^63..2^63-1 (two's complement)."""
-    return u - _U64 if u >= _S64 else u
-
-def signed_to_u64(s: int) -> int:
-    """Map signed -2^63..2^63-1 back to 0..2^64-1."""
-    return s + _U64 if s < 0 else s
-
-
+# -----------------------------
+# small utilities
+# -----------------------------
 def now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
@@ -31,23 +24,39 @@ def chunk_text(s: str, chunk_size: int, overlap: int) -> List[str]:
     s = (s or "").strip()
     if not s:
         return []
-    chunks, i, n = [], 0, len(s)
+    chunks: List[str] = []
+    i, n = 0, len(s)
     step = max(1, chunk_size - overlap)
     max_chunks = int(os.getenv("MAX_CHUNKS_PER_FILE", "500"))
     while i < n and len(chunks) < max_chunks:
-        chunk = s[i : i + chunk_size]
-        chunks.append(chunk)
+        chunks.append(s[i : i + chunk_size])
         i += step
     return chunks
 
 def sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-# -------- LLM helpers --------
+# -----------------------------
+# SimHash unsigned<->signed converters (BIGINT safe)
+# -----------------------------
+_U64 = 1 << 64
+_S64 = 1 << 63
+
+def u64_to_signed(u: int) -> int:
+    """Map unsigned 64-bit 0..2^64-1 into signed BIGINT -2^63..2^63-1."""
+    return u - _U64 if u >= _S64 else u
+
+def signed_to_u64(s: int) -> int:
+    """Map signed BIGINT -2^63..2^63-1 back to unsigned 64-bit."""
+    return s + _U64 if s < 0 else s
+
+# -----------------------------
+# LLM helpers (best-effort; fail closed)
+# -----------------------------
 def llm_chunk_meta(text: str) -> Dict[str, Any]:
     """
     Return {"title": str|None, "summary": str|None, "tags": List[str]}.
-    Fails closed with empty fields.
+    On any error, return empty fields.
     """
     try:
         from openai import OpenAI
@@ -55,7 +64,8 @@ def llm_chunk_meta(text: str) -> Dict[str, Any]:
         sys = "You are an expert technical summarizer. Return strict JSON {title, summary, tags}."
         prompt = (
             f"Text:\n{text[:4000]}\n\n"
-            "Return JSON with concise title, 1-3 sentence summary, and 2-5 short tags."
+            "Return JSON with concise title (<=120 chars), 1–3 sentence summary (<=1000 chars), "
+            "and 2–5 short tags."
         )
         r = oai.chat.completions.create(
             model=os.getenv("CHAT_MODEL", "gpt-4.1-mini"),
@@ -73,15 +83,18 @@ def llm_chunk_meta(text: str) -> Dict[str, Any]:
         return {"title": None, "summary": None, "tags": []}
 
 def llm_entities(text: str) -> List[Dict[str, str]]:
-    """Return [{'name':..., 'type': 'person|org|project|artifact|concept'}] or [] on failure."""
+    """
+    Return [{'name': str, 'type': 'person'|'org'|'project'|'artifact'|'concept'}] (max ~20).
+    Fail closed to [] on error.
+    """
     try:
         from openai import OpenAI
         oai = OpenAI()
         sys = (
-            "Extract named entities as JSON list with fields "
-            "{name, type in [person,org,project,artifact,concept]}."
+            "Extract named entities as a JSON array with items {name, type} where type is one of "
+            "[person, org, project, artifact, concept]. Return JSON only."
         )
-        msg = f"Text:\n{text[:3000]}\nReturn only JSON."
+        msg = f"Text:\n{text[:3000]}"
         r = oai.chat.completions.create(
             model=os.getenv("EXTRACTOR_MODEL", os.getenv("CHAT_MODEL", "gpt-4.1-mini")),
             messages=[{"role": "system", "content": sys}, {"role": "user", "content": msg}],
@@ -99,7 +112,9 @@ def llm_entities(text: str) -> List[Dict[str, str]]:
     except Exception:
         return []
 
-# -------- Entities in DB --------
+# -----------------------------
+# Entities in DB
+# -----------------------------
 def upsert_entity(sb, name: str, typ: str) -> Optional[str]:
     try:
         sel = sb.table("entities").select("id").eq("name", name).eq("type", typ).limit(1).execute()
@@ -128,12 +143,14 @@ def link_entities(sb, memory_id: str, ents: List[Dict[str, str]]) -> List[str]:
             pass
     return ids
 
-# -------- Main upsert pipeline --------
+# -----------------------------
+# Main upsert pipeline (used by upload/ingest and autosave)
+# -----------------------------
 def upsert_memories_from_chunks(
     *,
     sb,
     pinecone_index,
-    embedder,
+    embedder,  # kept for signature compatibility (unused)
     file_id: Optional[str],
     title_prefix: str,
     chunks: List[str],
@@ -144,9 +161,9 @@ def upsert_memories_from_chunks(
     text_col_env: str = "value",
 ) -> Dict[str, Any]:
     """
-    - exact duplicates (by sha256) are skipped
-    - near-duplicates (by SimHash distance <= SIMHASH_DISTANCE) are updated in-place (UPSERT_MODE=update)
-      or appended (UPSERT_MODE=append)
+    - exact duplicates (sha256) are skipped
+    - near-duplicates (SimHash Hamming <= SIMHASH_DISTANCE) are updated in-place when UPSERT_MODE=update
+      or appended as new when UPSERT_MODE=append
     - entity_ids are linked and included in Pinecone metadata
     """
     tags = tags or []
@@ -178,11 +195,10 @@ def upsert_memories_from_chunks(
             continue
 
         dedupe_hash = sha256_hex(text)
-        sh_u = simhash64(text)           # unsigned 64-bit
-        sh_s = u64_to_signed(sh_u)       # signed 64-bit for Postgres BIGINT
+        sh_u = simhash64(text)        # unsigned 64-bit
+        sh_s = u64_to_signed(sh_u)    # signed BIGINT-safe
 
-
-        # 1) exact duplicate
+        # ---- exact duplicate
         existing = (
             sb.table("memories")
             .select("id,embedding_id")
@@ -195,7 +211,7 @@ def upsert_memories_from_chunks(
             skipped.append({"idx": idx, "reason": "duplicate", "memory_id": rows[0]["id"]})
             continue
 
-        # 2) find nearest recent same-type row for near-dup detection
+        # ---- near-duplicate search (recent, same type)
         near = (
             sb.table("memories")
             .select(f"id,{text_col},simhash64,created_at")
@@ -205,32 +221,31 @@ def upsert_memories_from_chunks(
             .execute()
         )
         near_rows = near.data if hasattr(near, "data") else near.get("data") or []
-nearest = None
-best_hd = 65
-for r in near_rows:
-    sim = r.get("simhash64")
-    if sim is None:
-        continue
-    sim_u = signed_to_u64(int(sim))  # DB signed -> unsigned
-    hd = hamming(sim_u, sh_u)
-    if hd < best_hd:
-        best_hd, nearest = hd, r
+        nearest = None
+        best_hd = 65
+        for r in near_rows:
+            sim = r.get("simhash64")
+            if sim is None:
+                continue
+            sim_u = signed_to_u64(int(sim))  # DB -> unsigned
+            hd = hamming(sim_u, sh_u)
+            if hd < best_hd:
+                best_hd, nearest = hd, r
 
-
-        # 3) LLM metadata
+        # ---- LLM metadata
         meta = llm_chunk_meta(text)
-        title = meta["title"] or f"{title_prefix} — part {idx+1}"
+        title = meta["title"] or f"{title_prefix} — part {idx + 1}"
         summary = meta["summary"]
         tagset = list({*(tags or []), *meta["tags"]})
 
-        # 4) update-in-place flow for near-dup
+        # ---- update-in-place for near-dup
         if nearest and best_hd <= sim_thresh and mode == "update":
             try:
                 sb.table("memories").update(
                     {
                         text_col: text,
                         "dedupe_hash": dedupe_hash,
-                        "simhash64": sh_s,
+                        "simhash64": sh_s,  # signed
                         "title": title,
                         "summary": summary,
                         "tags": tagset,
@@ -245,12 +260,7 @@ for r in near_rows:
                 vec = embed(text)
                 if vec:
                     vector_id = f"mem_{memory_id}"
-                    namespace = {
-                        "semantic": "semantic",
-                        "episodic": "episodic",
-                        "procedural": "procedural",
-                    }[mem_type]
-                    # entities
+                    namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
                     eid_list = link_entities(sb, memory_id, llm_entities(text))
                     metadata = {
                         "type": mem_type,
@@ -273,10 +283,10 @@ for r in near_rows:
                 updated.append({"idx": idx, "memory_id": memory_id, "hd": best_hd})
                 continue
             except Exception:
-                # fall through to insert as new
+                # fall through to insert-as-new
                 pass
 
-        # 5) insert brand new (or append mode)
+        # ---- insert brand-new row
         payload = {
             "type": mem_type,
             "title": title,
@@ -287,18 +297,12 @@ for r in near_rows:
             "role_view": role_view,
             "file_id": file_id,
             "dedupe_hash": dedupe_hash,
-            "simhash64": sh_s,
+            "simhash64": sh_s,  # signed
         }
         sb.table("memories").insert(payload).execute()
 
         # fetch id
-        sel = (
-            sb.table("memories")
-            .select("id")
-            .eq("dedupe_hash", dedupe_hash)
-            .limit(1)
-            .execute()
-        )
+        sel = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
         data = sel.data if hasattr(sel, "data") else sel.get("data")
         if not data:
             skipped.append({"idx": idx, "reason": "insert_select_missed"})
@@ -311,7 +315,6 @@ for r in near_rows:
             try:
                 vector_id = f"mem_{memory_id}"
                 namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
-                # entities
                 eid_list = link_entities(sb, memory_id, llm_entities(text))
                 metadata = {
                     "type": mem_type,
@@ -333,14 +336,13 @@ for r in near_rows:
             except Exception:
                 pass
         else:
-            # still link entities for graph even if embedding failed
+            # still extract+link entities for graph even if embedding failed
             try:
                 link_entities(sb, memory_id, llm_entities(text))
             except Exception:
                 pass
 
-        # TODO (append mode history edges) when UPSERT_MODE=append
-
         created.append({"idx": idx, "memory_id": memory_id})
 
+    # final, correctly indented return
     return {"upserted": created, "skipped": skipped, "updated": updated}
