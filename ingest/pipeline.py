@@ -90,21 +90,49 @@ def upsert_entity(sb, name: str, typ: str) -> Optional[str]:
     except Exception:
         return None
 
-def link_entities(sb, memory_id: str, ents: List[Dict[str,str]]):
+def link_entities(sb, memory_id: str, ents: List[Dict[str,str]]) -> List[str]:
+    ids: List[str] = []
     for e in ents:
         eid = upsert_entity(sb, e["name"], e["type"])
-        if not eid: 
+        if not eid:
             continue
+        ids.append(eid)
         try:
-            sb.table("entity_mentions").insert({"entity_id": eid, "memory_id": memory_id, "weight": 1.0}).execute()
+            sb.table("entity_mentions").insert(
+                {"entity_id": eid, "memory_id": memory_id, "weight": 1.0}
+            ).execute()
         except Exception:
             pass
+    return ids
+
 def upsert_memories_from_chunks(*, sb, pinecone_index, embedder, file_id: Optional[str], title_prefix: str, chunks: List[str], mem_type: str = "semantic", tags: Optional[List[str]] = None, role_view: Optional[List[str]] = None, source: str = "upload", text_col_env: str = "value") -> Dict[str, Any]:
     tags = tags or []
     role_view = role_view or []
     text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or text_col_env).strip().lower()
     mode = (os.getenv("UPSERT_MODE","update")).lower()
     sim_thresh = int(os.getenv("SIMHASH_DISTANCE","6"))
+    entity_ids = []
+
+# ... after you obtain a memory_id and before/while embedding:
+ents = llm_entities(text)                 # already present in Phase 3
+# For update-in-place path:
+entity_ids = link_entities(sb, memory_id, ents)
+
+# For brand-new row path:
+entity_ids = link_entities(sb, memory_id, ents)
+
+# In both Pinecone upserts, include entity_ids:
+metadata = {
+    "type": mem_type,
+    "title": title,
+    "tags": tagset,
+    "created_at": now_iso(),
+    "role_view": role_view,
+    "entity_ids": entity_ids,    # <-- NEW
+    "source": source,
+}
+index.upsert(vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
+             namespace=namespace)
 
     created, skipped, updated = [], [], []
 
