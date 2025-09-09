@@ -1,6 +1,6 @@
 # router/ingest.py
 import os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -15,17 +15,17 @@ router = APIRouter()
 class IngestItem(BaseModel):
     title: str
     text: str
-    # Keep the same validation semantics you already had
-    type: str = Field("semantic", regex="^(semantic|episodic|procedural)$")
-    tags: List[str] = []
+    # Use Literal for validation instead of regex= (removed in Pydantic v2)
+    type: Literal["semantic", "episodic", "procedural"] = "semantic"
+    tags: List[str] = Field(default_factory=list)
     source: str = "ingest"
-    role_view: List[str] = []
+    role_view: List[str] = Field(default_factory=list)
     file_id: Optional[str] = None
 
 
 class IngestBatch(BaseModel):
     items: List[IngestItem]
-    dedupe: bool = True  # reserved; exact dedupe is always enforced server-side
+    dedupe: bool = True  # reserved; exact dedupe enforced server-side
 
 
 @router.post("/ingest/batch")
