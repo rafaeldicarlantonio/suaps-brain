@@ -4,6 +4,19 @@ from typing import List, Dict, Any, Optional
 
 from ingest.simhash import simhash64, hamming
 
+# unsigned<->signed 64-bit helpers for SimHash
+_U64 = 1 << 64
+_S64 = 1 << 63
+
+def u64_to_signed(u: int) -> int:
+    """Map 0..2^64-1 into signed -2^63..2^63-1 (two's complement)."""
+    return u - _U64 if u >= _S64 else u
+
+def signed_to_u64(s: int) -> int:
+    """Map signed -2^63..2^63-1 back to 0..2^64-1."""
+    return s + _U64 if s < 0 else s
+
+
 def now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
@@ -165,7 +178,9 @@ def upsert_memories_from_chunks(
             continue
 
         dedupe_hash = sha256_hex(text)
-        sh = simhash64(text)
+        sh_u = simhash64(text)           # unsigned 64-bit
+        sh_s = u64_to_signed(sh_u)       # signed 64-bit for Postgres BIGINT
+
 
         # 1) exact duplicate
         existing = (
@@ -190,13 +205,17 @@ def upsert_memories_from_chunks(
             .execute()
         )
         near_rows = near.data if hasattr(near, "data") else near.get("data") or []
-        nearest = None
-        best_hd = 65
-        for r in near_rows:
-            sim = r.get("simhash64") or 0
-            hd = hamming(int(sim), int(sh)) if sim is not None else 65
-            if hd < best_hd:
-                best_hd, nearest = hd, r
+nearest = None
+best_hd = 65
+for r in near_rows:
+    sim = r.get("simhash64")
+    if sim is None:
+        continue
+    sim_u = signed_to_u64(int(sim))  # DB signed -> unsigned
+    hd = hamming(sim_u, sh_u)
+    if hd < best_hd:
+        best_hd, nearest = hd, r
+
 
         # 3) LLM metadata
         meta = llm_chunk_meta(text)
@@ -211,7 +230,7 @@ def upsert_memories_from_chunks(
                     {
                         text_col: text,
                         "dedupe_hash": dedupe_hash,
-                        "simhash64": sh,
+                        "simhash64": sh_s,
                         "title": title,
                         "summary": summary,
                         "tags": tagset,
@@ -268,7 +287,7 @@ def upsert_memories_from_chunks(
             "role_view": role_view,
             "file_id": file_id,
             "dedupe_hash": dedupe_hash,
-            "simhash64": sh,
+            "simhash64": sh_s,
         }
         sb.table("memories").insert(payload).execute()
 
