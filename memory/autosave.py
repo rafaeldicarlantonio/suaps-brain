@@ -1,47 +1,65 @@
-from __future__ import annotations
+# memory/autosave.py
+import os, hashlib, datetime
+from typing import List, Dict, Any, Optional
 
-import os, time
-from typing import Any, Dict, List
-from vendors.openai_client import EMBED_MODEL, client
-from vendors.pinecone_client import get_index
-from vendors.supabase_client import supabase
-from agent import store
+from ingest.pipeline import normalize_text, upsert_memories_from_chunks
 
-AUTOSAVE_CONF_THRESHOLD = float(os.getenv("AUTOSAVE_CONF_THRESHOLD","0.75"))
-AUTOSAVE_ENTITY_CONF_THRESHOLD = float(os.getenv("AUTOSAVE_ENTITY_CONF_THRESHOLD","0.85"))
+def _now_iso():
+    return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
-def _embed(text: str):
-    return client.embeddings.create(model=EMBED_MODEL, input=text).data[0].embedding
+def apply_autosave(
+    *,
+    sb,
+    pinecone_index,
+    candidates: List[Dict[str, Any]],
+    session_id: Optional[str],
+    text_col_env: str = "value",
+) -> Dict[str, Any]:
+    """Filter autosave candidates by thresholds, save them via the ingest pipeline."""
+    thr_fact = float(os.getenv("AUTOSAVE_CONF_THRESHOLD", "0.75"))
+    thr_ent  = float(os.getenv("AUTOSAVE_ENTITY_CONF_THRESHOLD", "0.85"))
 
-def autosave_from_candidates(items: List[Dict[str,Any]], session_id: str) -> Dict[str,Any]:
-    saved_items=[]
-    for it in items or []:
-        fact_type = it.get("fact_type")
-        conf = float(it.get("confidence",0.0))
-        if fact_type in ("decision","deadline","procedure") and conf >= AUTOSAVE_CONF_THRESHOLD:
-            text = it.get("text","").strip()
-            if not text:
-                continue
-            import hashlib
-            dh = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            ex = store.find_memory_by_dedupe_hash(dh)
-            if ex:
-                continue
-            mem = {
-                "type": "episodic" if fact_type in ("decision","deadline") else "procedural",
-                "title": it.get("title") or fact_type,
-                "text": text,
-                "tags": it.get("tags") or [],
-                "source": "chat",
-                "session_id": session_id,
-                "dedupe_hash": dh,
-            }
-            row = store.upsert_memory(mem)
-            # Embed + upsert
-            vec = _embed(text)
-            idx = get_index()
-            emb_id = f"mem_{row['id']}"
-            idx.upsert(vectors=[{"id": emb_id, "values": vec, "metadata": {"type": mem["type"], "title": mem["title"], "tags": mem["tags"], "source": "chat"}}], namespace=mem["type"])
-            store.update_memory_embedding_id(row["id"], emb_id)
-            saved_items.append({"memory_id": row["id"], "type": mem["type"], "title": mem["title"]})
-    return {"saved": len(saved_items)>0, "items": saved_items}
+    saved, skipped = [], []
+    for c in candidates or []:
+        ftype = (c.get("fact_type") or "").lower()
+        conf  = float(c.get("confidence") or 0)
+        title = c.get("title") or ftype.title()
+        text  = normalize_text(c.get("text") or "")
+        tags  = c.get("tags") or []
+
+        if not text or not ftype:
+            skipped.append({"reason": "missing_fields", "title": title})
+            continue
+
+        # policy: entities require higher confidence; other facts use thr_fact
+        if ftype == "entity" and conf < thr_ent:
+            skipped.append({"reason": "low_conf_entity", "title": title})
+            continue
+        if ftype != "entity" and conf < thr_fact:
+            skipped.append({"reason": "low_conf_fact", "title": title})
+            continue
+
+        # map type to memory.type
+        mem_type = "procedural" if ftype == "procedure" else "episodic"
+
+        # upsert via pipeline (single "chunk")
+        r = upsert_memories_from_chunks(
+            sb=sb,
+            pinecone_index=pinecone_index,
+            embedder=None,
+            file_id=None,
+            title_prefix=title,
+            chunks=[text],
+            mem_type=mem_type,
+            tags=tags,
+            role_view=[],
+            source="chat",
+            text_col_env=text_col_env,
+        )
+        if r.get("upserted") or r.get("updated"):
+            item = (r.get("upserted") or r.get("updated"))[0]
+            saved.append({"memory_id": item.get("memory_id"), "type": mem_type, "title": title})
+        else:
+            skipped.append({"reason": "pipeline_noop", "title": title})
+
+    return {"saved": True if saved else False, "items": saved, "skipped": skipped}
