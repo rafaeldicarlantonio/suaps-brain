@@ -176,7 +176,9 @@ def upsert_memories_from_chunks(
             continue
 
         dedupe_hash = sha256_hex(text)
-        sh = simhash64(text)
+        sh_u = simhash64(text)           # unsigned 64-bit
+        sh_s = u64_to_signed(sh_u)       # signed 64-bit for Postgres BIGINT
+
 
         # 1) exact duplicate
         existing = (
@@ -201,13 +203,17 @@ def upsert_memories_from_chunks(
             .execute()
         )
         near_rows = near.data if hasattr(near, "data") else near.get("data") or []
-        nearest = None
-        best_hd = 65
-        for r in near_rows:
-            sim = r.get("simhash64") or 0
-            hd = hamming(int(sim), int(sh)) if sim is not None else 65
-            if hd < best_hd:
-                best_hd, nearest = hd, r
+nearest = None
+best_hd = 65
+for r in near_rows:
+    sim = r.get("simhash64")
+    if sim is None:
+        continue
+    # convert signed BIGINT from DB back to unsigned 64-bit
+    sim_u = signed_to_u64(int(sim))
+    hd = hamming(sim_u, sh_u)
+    if hd < best_hd:
+        best_hd, nearest = hd, r
 
         # 3) LLM metadata
         meta = llm_chunk_meta(text)
@@ -222,7 +228,7 @@ def upsert_memories_from_chunks(
                     {
                         text_col: text,
                         "dedupe_hash": dedupe_hash,
-                        "simhash64": sh,
+                        "simhash64": sh_s,
                         "title": title,
                         "summary": summary,
                         "tags": tagset,
@@ -279,7 +285,7 @@ def upsert_memories_from_chunks(
             "role_view": role_view,
             "file_id": file_id,
             "dedupe_hash": dedupe_hash,
-            "simhash64": sh,
+            "simhash64": sh_s,
         }
         sb.table("memories").insert(payload).execute()
 
