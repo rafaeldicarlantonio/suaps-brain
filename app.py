@@ -39,7 +39,7 @@ _mount("ingest")
 _mount("memories")        # ← the one we care about
 _mount("debug_selftest")  # or your debug router name
 _mount("search")
-
+_mount("entities")
 
 # (D) Health – use root-level 'vendors/' helpers
 @app.get("/healthz")
