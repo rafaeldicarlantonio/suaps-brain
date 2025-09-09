@@ -1,6 +1,6 @@
 # router/search.py
 from typing import Optional, List, Dict, Any
-import os, re
+import os, re, math, datetime
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,35 @@ def _resp_data(resp) -> List[Dict[str, Any]]:
     if isinstance(resp, dict):
         return resp.get("data") or []
     return []
+
+# --- hybrid rank helpers (Phase 3) ---
+HALF_LIFE_DAYS = int(os.getenv("RECENCY_HALFLIFE_DAYS", "90"))
+
+def _recency_weight(iso: str) -> float:
+    """Exponential decay with half-life in days (default 90)."""
+    try:
+        dt = datetime.datetime.fromisoformat((iso or "").replace("Z", "+00:00"))
+        delta = datetime.datetime.now(datetime.timezone.utc) - dt
+        days = max(0.0, delta.total_seconds() / 86400.0)
+        return math.exp(-math.log(2) * (days / max(1, HALF_LIFE_DAYS)))
+    except Exception:
+        return 1.0
+
+def _source_priority(title: Optional[str], typ: Optional[str]) -> float:
+    """
+    Simple source prior:
+      meeting minutes > SOP/policy > wiki > misc
+      plus a small bump if type is procedural (SOP-like).
+    """
+    t = (title or "").lower()
+    if "minutes" in t or "meeting" in t:
+        return 1.0
+    if "sop" in t or "policy" in t or (typ or "").lower() == "procedural":
+        return 0.9
+    if "wiki" in t:
+        return 0.7
+    return 0.5
+
 
 # ----- main endpoint -----
 
@@ -152,6 +181,14 @@ def search_semantic(body: SearchIn, x_api_key: Optional[str] = Header(None)):
             if body.include_text:
                 item["text"] = r.get(text_col)
             result.append(item)
+                # --- Phase 3: Hybrid re-ranking ---
+        # score_final = 0.55*semantic + 0.20*recency + 0.10*source_priority
+        for it in result:
+            base = it.get("score") or 0.0
+            rec = _recency_weight(it.get("created_at") or "")
+            sp  = _source_priority(it.get("title"), it.get("type"))
+            it["hybrid_score"] = 0.55*base + 0.20*rec + 0.10*sp  # reserve 0.15 for entity overlap (Phase 4)
+        result.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
         return {"items": result}
     except Exception as e:
         # If join fails, still return match skeletons
