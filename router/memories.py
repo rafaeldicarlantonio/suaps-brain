@@ -3,6 +3,7 @@ import os, re, hashlib, datetime
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, root_validator, validator
+from auth.light_identity import ensure_user
 
 router = APIRouter()
 _ALLOWED_TYPES = {"episodic", "semantic", "procedural"}
@@ -68,7 +69,7 @@ def _resp_data(resp) -> List[Dict[str, Any]]:
 
 # ---------- Core logic shared by all route aliases ----------
 
-async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> Dict[str, Any]:
+async def _memories_upsert_core(request: Request, x_api_key: Optional[str], x_user_email: Optional[str] = Header(None),) -> Dict[str, Any]:
     # Optional API key
     expected = os.getenv("X_API_KEY")
     if expected and x_api_key != expected:
@@ -119,6 +120,7 @@ async def _memories_upsert_core(request: Request, x_api_key: Optional[str]) -> D
                 "source": source,
                 "role_view": role_view,
                 "dedupe_hash": dedupe_hash,
+                author_user_id=author_user_id,
             }
 
             # INSERT (no .select() chaining)
