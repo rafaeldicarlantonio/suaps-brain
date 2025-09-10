@@ -242,25 +242,22 @@ def upsert_memories_from_chunks(
         # ---- update-in-place for near-dup
         if nearest and best_hd <= sim_thresh and mode == "update":
             try:
-                sb.table("memories").update(
-                    {
-                        text_col: text,
-                        "dedupe_hash": dedupe_hash,
-                        "simhash64": sh_s,  # signed
-                        "title": title,
-                        "summary": summary,
-                        "tags": tagset,
-                        "updated_at": datetime.datetime.utcnow().isoformat(),
-                        "file_id": file_id,
-                        "source": source,
-                    }
-            if author_user_id:
-                try:
+                upd = {
+                    text_col: text,
+                    "dedupe_hash": dedupe_hash,
+                    "simhash64": sh_s,  # signed
+                    "title": title,
+                    "summary": summary,
+                    "tags": tagset,
+                    "updated_at": datetime.datetime.utcnow().isoformat(),
+                    "file_id": file_id,
+                    "source": source,
+                    "type": mem_type,
+                }
+                if author_user_id:
                     upd["author_user_id"] = author_user_id
-                except Exception:
-                     pass
-            sb.table("memories").update(upd).eq("id", nearest["id"]).execute()
-                ).eq("id", nearest["id"]).execute()
+
+                sb.table("memories").update(upd).eq("id", nearest["id"]).execute()
                 memory_id = nearest["id"]
 
                 # embed + upsert vector
@@ -277,6 +274,7 @@ def upsert_memories_from_chunks(
                         "role_view": role_view,
                         "entity_ids": eid_list,
                         "source": source,
+                        "author_user_id": author_user_id,
                     }
                     pinecone_index.upsert(
                         vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
@@ -290,7 +288,7 @@ def upsert_memories_from_chunks(
                 updated.append({"idx": idx, "memory_id": memory_id, "hd": best_hd})
                 continue
             except Exception:
-                # fall through to insert-as-new
+                # fall through to insert-as-new if update failed
                 pass
 
         # ---- insert brand-new row
@@ -305,21 +303,31 @@ def upsert_memories_from_chunks(
             "file_id": file_id,
             "dedupe_hash": dedupe_hash,
             "simhash64": sh_s,  # signed
-            if author_user_id:
-               try:
-                   payload["author_user_id"] = author_user_id
-               except Exception:
-                 pass
         }
-        sb.table("memories").insert(payload).execute()
+        if author_user_id:
+            payload["author_user_id"] = author_user_id
+
+        try:
+            ins = sb.table("memories").insert(payload).execute()
+        except Exception:
+            skipped.append({"idx": idx, "reason": "insert_failed"})
+            continue
 
         # fetch id
-        sel = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
-        data = sel.data if hasattr(sel, "data") else sel.get("data")
-        if not data:
+        try:
+            d = ins.data if hasattr(ins, "data") else ins.get("data") or []
+            if d and isinstance(d, list) and d[0].get("id"):
+                memory_id = d[0]["id"]
+            else:
+                sel = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
+                data = sel.data if hasattr(sel, "data") else sel.get("data")
+                memory_id = data[0]["id"] if data else None
+        except Exception:
+            memory_id = None
+
+        if not memory_id:
             skipped.append({"idx": idx, "reason": "insert_select_missed"})
             continue
-        memory_id = data[0]["id"]
 
         # embed + upsert vector
         vec = embed(text)
@@ -357,5 +365,5 @@ def upsert_memories_from_chunks(
 
         created.append({"idx": idx, "memory_id": memory_id})
 
-    # final, correctly indented return
+    # final return
     return {"upserted": created, "skipped": skipped, "updated": updated}
