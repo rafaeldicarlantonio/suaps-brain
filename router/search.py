@@ -5,6 +5,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from ingest.pipeline import llm_entities   # reuse the extractor
 from vendors.supabase_client import get_client
+from vendors.pinecone_client import get_index, safe_query
 
 router = APIRouter()
 
@@ -113,13 +114,23 @@ def search_semantic(body: SearchIn, x_api_key: Optional[str] = Header(None)):
     for t in types:
         try:
             # SDK compatibility: both dict and object responses supported
-            res = index.query(
-                vector=qvec,
-                top_k=body.top_k,
-                namespace=t,
-                include_values=False,
-                include_metadata=True,
-            )
+            res = safe_query(
+    index,
+    vector=qvec,
+    top_k=body.top_k,
+    include_metadata=True,
+    namespace=t
+)
+# normalized shape: res.matches is a list of objects with .id, .score, .metadata
+for m in (res.matches or []):
+    md = m.metadata or {}
+    mem_id = (md.get("id") or (m.id or "")).replace("mem_","")
+    score = float(m.score or 0.0)
+    matches.append({
+        "memory_id": mem_id,
+        "type": t,
+        "score": score
+    })
             items = []
             if isinstance(res, dict):
                 items = res.get("matches", []) or []
