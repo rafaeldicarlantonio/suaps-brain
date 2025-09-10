@@ -11,10 +11,10 @@ from openai import OpenAI
 
 from vendors.supabase_client import get_client
 from vendors.pinecone_client import get_index, safe_query
-from ingest.pipeline import normalize_text  # used in context packing
+from ingest.pipeline import normalize_text
 from memory.autosave import apply_autosave
 from guardrails.redteam import review_answer
-from auth.light_identity import ensure_user
+from auth.light_identity import ensure_user  # <-- attribution helper
 
 router = APIRouter()
 client = OpenAI()
@@ -56,7 +56,6 @@ def _embed(text: str) -> List[float]:
 
 
 def _retrieve(sb, index, query: str, top_k_per_type: int = 8) -> List[Dict[str, Any]]:
-    """Semantic retrieval for /chat, normalized via safe_query."""
     vec = _embed(query)
     namespaces = ["semantic", "episodic", "procedural"]
     hits: List[Dict[str, Any]] = []
@@ -104,18 +103,11 @@ def _retrieve(sb, index, query: str, top_k_per_type: int = 8) -> List[Dict[str, 
 
 
 def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fetch memory text for top items and return compact context."""
     if not items:
         return []
     ids = [it["id"] for it in items]
     text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "value")).strip().lower()
-    rows = (
-        sb.table("memories")
-        .select(f"id,title,{text_col}")
-        .in_("id", ids)
-        .limit(len(ids))
-        .execute()
-    )
+    rows = sb.table("memories").select(f"id,title,{text_col}").in_("id", ids).limit(len(ids)).execute()
     data = rows.data if hasattr(rows, "data") else rows.get("data") or []
     by_id = {r["id"]: r for r in data}
     out: List[Dict[str, Any]] = []
@@ -123,18 +115,11 @@ def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         r = by_id.get(it["id"])
         if not r:
             continue
-        out.append(
-            {
-                "id": it["id"],
-                "title": r.get("title") or "",
-                "text": normalize_text(r.get(text_col) or ""),
-            }
-        )
+        out.append({"id": it["id"], "title": r.get("title") or "", "text": normalize_text(r.get(text_col) or "")})
     return out
 
 
 def _answer_json(prompt: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Call the Answerer with a strict-JSON prompt. Retry once on parse failure."""
     sys = "You are SUAPS Brain. Return strict JSON with keys: answer, citations, guidance_questions, autosave_candidates."
     compact_ctx = [{"id": c["id"], "title": c["title"], "text": c["text"][:2000]} for c in context[:8]]
     user = json.dumps({"question": prompt, "context": compact_ctx})
@@ -161,46 +146,46 @@ def _answer_json(prompt: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # ---------- Route ----------
 @router.post("/chat", response_model=ChatResp)
-def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None), x_user_email: Optional[str] = Header(None)):
+def chat_chat_post(
+    body: ChatReq,
+    x_api_key: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),  # attribution header
+):
     _auth(x_api_key)
     sb = get_client()
-    author_user_id = ensure_user(sb=sb, email=x_user_email)
     index = get_index()
     t0 = datetime.datetime.utcnow()
 
-    # 1) Ensure a session id without relying on created_at
+    # Resolve/ensure user (best-effort)
+    author_user_id = ensure_user(sb=sb, email=x_user_email)
+
+    # Ensure a session id
     session_id = body.session_id
     if not session_id:
-        session_payload = {"title": None}
-        if author_user_id:  # only if column exists; if not, Supabase will error — so guard it
-            try:
-                session_payload["user_id"] = author_user_id
-             except Exception:
-                 pass
+        # Try DB-generated id
+        payload = {"title": None}
+        if author_user_id:
+            payload["user_id"] = author_user_id
         try:
-            sb.table("sessions").insert(session_payload).execute()
-            # fetch the id we just created
+            sb.table("sessions").insert(payload).execute()
             sel = sb.table("sessions").select("id").order("created_at", desc=True).limit(1).execute()
             data = sel.data if hasattr(sel, "data") else sel.get("data") or []
             if data:
                 session_id = data[0]["id"]
         except Exception:
-            # very defensive fallback: generate a local uuid
-            from uuid import uuid4
-            session_id = session_id or str(uuid4())
+            # Local fallback
+            session_id = str(uuid4())
 
-
-    # 2) Retrieval
+    # Retrieval
     retrieved_meta = _retrieve(sb, index, body.prompt, top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8")))
     retrieved_chunks = _pack_context(sb, retrieved_meta)
 
-    # 3) Answer
+    # Answer
     draft = _answer_json(body.prompt, retrieved_chunks)
     if not isinstance(draft, dict):
         raise HTTPException(status_code=500, detail="Answerer returned non-JSON")
 
-    # 4) Red-team review (non-fatal)
-    verdict: Dict[str, Any]
+    # Red-team (non-fatal)
     try:
         verdict = review_answer(draft_json=draft, prompt=body.prompt, retrieved_chunks=retrieved_chunks) or {}
     except Exception:
@@ -218,7 +203,7 @@ def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None), x_use
             "metrics": {"latency_ms": int((datetime.datetime.utcnow() - t0).total_seconds() * 1000)},
         }
 
-    # 5) Autosave (non-fatal)
+    # Autosave (non-fatal)
     try:
         autosave = apply_autosave(
             sb=sb,
@@ -226,12 +211,12 @@ def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None), x_use
             candidates=draft.get("autosave_candidates") or [],
             session_id=session_id,
             text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
-            author_user_id=author_user_id,
+            author_user_id=author_user_id,  # pass attribution
         )
     except Exception:
         autosave = {"saved": False, "items": []}
 
-    # 6) Persist messages (best-effort)
+    # Persist messages (best-effort)
     try:
         sb.table("messages").insert(
             {"session_id": session_id, "role": "user", "content": body.prompt, "model": os.getenv("CHAT_MODEL")}
@@ -248,7 +233,6 @@ def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None), x_use
     except Exception:
         pass
 
-    # 7) Respond
     return {
         "session_id": session_id,
         "answer": draft.get("answer") or "",
