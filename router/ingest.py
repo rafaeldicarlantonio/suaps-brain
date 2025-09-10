@@ -1,4 +1,52 @@
 # router/ingest.py
+from typing import Optional
+from fastapi import Header
+
+@router.post("/ingest/batch", response_model=IngestBatchResponse)
+def ingest_batch_ingest_batch_post(
+    body: IngestBatchRequest,
+    x_api_key: Optional[str] = Header(None),
+    x_idempotency_key: Optional[str] = Header(None),
+):
+    _auth(x_api_key)
+    sb = get_client()
+    index = get_index()
+
+    # 1) serve a previous identical attempt if key matches
+    idem = (x_idempotency_key or "").strip()
+    if idem:
+        try:
+            hit = (
+                sb.table("tool_runs")
+                .select("output_json")
+                .eq("name", "ingest_batch")
+                .eq("idempotency_key", idem)
+                .limit(1)
+                .execute()
+            )
+            data = hit.data if hasattr(hit, "data") else hit.get("data") or []
+            if data and data[0].get("output_json"):
+                return data[0]["output_json"]
+        except Exception:
+            pass
+
+    # ... run your normal ingest batching here, yielding `resp` at the end ...
+
+    # 2) store the response for future identical retries
+    try:
+        sb.table("tool_runs").insert({
+            "name": "ingest_batch",
+            "input_json": {"items": len(body.items)},
+            "output_json": resp,
+            "success": True,
+            "latency_ms": 0,
+            "idempotency_key": idem or None
+        }).execute()
+    except Exception:
+        pass
+
+    return resp
+
 import os
 from typing import Optional, List, Dict, Any, Literal
 
