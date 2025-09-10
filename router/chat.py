@@ -60,8 +60,9 @@ def _retrieve(sb, index, query: str, top_k_per_type: int = 10) -> List[Dict[str,
     namespaces = ["semantic","episodic","procedural"]
     hits: List[Dict[str, Any]] = []
     for ns in namespaces:
-        qr = index.query(vector=vec, top_k=top_k_per_type, include_metadata=True, namespace=ns)
-        for m in qr.matches or []:
+        from vendors.pinecone_client import safe_query
+qr = safe_query(index, vector=vec, top_k=top_k, include_metadata=True, namespace=ns)
+for m in qr.matches:
             mid = (m.metadata or {}).get("id") or (m.id or "").replace("mem_","")
             hits.append({
                 "memory_id": mid,
