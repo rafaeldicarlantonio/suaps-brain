@@ -14,6 +14,7 @@ def apply_autosave(
     candidates: List[Dict[str, Any]],
     session_id: Optional[str],
     text_col_env: str = "value",
+    author_user_id=None,
 ) -> Dict[str, Any]:
     """Filter autosave candidates by thresholds, save them via the ingest pipeline."""
     thr_fact = float(os.getenv("AUTOSAVE_CONF_THRESHOLD", "0.75"))
@@ -55,6 +56,7 @@ def apply_autosave(
             role_view=[],
             source="chat",
             text_col_env=text_col_env,
+            author_user_id=author_user_id,
         )
         if r.get("upserted") or r.get("updated"):
             item = (r.get("upserted") or r.get("updated"))[0]
