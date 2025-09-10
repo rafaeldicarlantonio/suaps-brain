@@ -159,6 +159,7 @@ def upsert_memories_from_chunks(
     role_view: Optional[List[str]] = None,
     source: str = "upload",
     text_col_env: str = "value",
+    author_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     - exact duplicates (sha256) are skipped
@@ -253,6 +254,12 @@ def upsert_memories_from_chunks(
                         "file_id": file_id,
                         "source": source,
                     }
+            if author_user_id:
+                try:
+                    upd["author_user_id"] = author_user_id
+                except Exception:
+                     pass
+            sb.table("memories").update(upd).eq("id", nearest["id"]).execute()
                 ).eq("id", nearest["id"]).execute()
                 memory_id = nearest["id"]
 
@@ -298,6 +305,11 @@ def upsert_memories_from_chunks(
             "file_id": file_id,
             "dedupe_hash": dedupe_hash,
             "simhash64": sh_s,  # signed
+            if author_user_id:
+               try:
+                   payload["author_user_id"] = author_user_id
+               except Exception:
+                 pass
         }
         sb.table("memories").insert(payload).execute()
 
@@ -324,6 +336,7 @@ def upsert_memories_from_chunks(
                     "role_view": role_view,
                     "entity_ids": eid_list,
                     "source": source,
+                    "author_user_id": author_user_id,
                 }
                 pinecone_index.upsert(
                     vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
