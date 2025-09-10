@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from vendors.supabase_client import get_client
 from vendors.pinecone_client import get_index
 from ingest.pipeline import upsert_memories_from_chunks, normalize_text
+from auth.light_identity import ensure_user
 
 router = APIRouter()
 
@@ -35,9 +36,10 @@ def _auth(x_api_key: Optional[str]):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 @router.post("/ingest/batch", response_model=IngestBatchResponse)
-def ingest_batch_ingest_batch_post(body: IngestBatchRequest, x_api_key: Optional[str] = Header(None)):
+def ingest_batch_ingest_batch_post(body: IngestBatchRequest, x_api_key: Optional[str] = Header(None), x_user_email: Optional[str] = Header(None),):
     _auth(x_api_key)
     sb = get_client()
+    author_user_id = ensure_user(sb=sb, email=x_user_email)
     index = get_index()
 
     # simple size guard to avoid huge single calls
@@ -79,6 +81,7 @@ def ingest_batch_ingest_batch_post(body: IngestBatchRequest, x_api_key: Optional
             role_view=role_view,
             source=source,
             text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+            author_user_id=author_user_id,
         )
         all_upserted.extend(resp.get("upserted", []))
         all_updated.extend(resp.get("updated", []))
