@@ -1,8 +1,8 @@
 [
   {
     "id": "zephyr_decision_001",
-    "prompt": "What did we decide in the Zephyr meeting?",
-    "must_include": ["consolidate", "Zephyr"],
+    "prompt": "Summarize Multi-Layered content flow for SUAPS lectures.",
+    "must_include": ["content", "Lectures"],
     "must_cite_any": ["mem_","-"], 
     "max_latency_ms": 7000
   },
