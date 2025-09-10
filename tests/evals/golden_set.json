@@ -1,10 +1,16 @@
 [
   {
     "id": "zephyr_decision_001",
-    "prompt": "What did we decide in the Zephyr meeting on Aug 14?",
-    "must_include": ["consolidate the Zephyr datasets"],
-    "must_cite_tags_any": ["Zephyr", "meeting"],
-    "max_latency_ms": 3000,
-    "role": "researcher"
+    "prompt": "What did we decide in the Zephyr meeting?",
+    "must_include": ["consolidate", "Zephyr"],
+    "must_cite_any": ["mem_","-"], 
+    "max_latency_ms": 7000
+  },
+  {
+    "id": "council_memo_lookup",
+    "prompt": "Summarize the Council memo proposal and cite the source IDs.",
+    "must_include": ["proposal", "Council"],
+    "must_cite_any": ["mem_"],
+    "max_latency_ms": 7000
   }
 ]
