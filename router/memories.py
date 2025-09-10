@@ -1,237 +1,67 @@
-from typing import Optional, List, Any, Dict, Literal
-import os, re, hashlib, datetime
-from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, root_validator, validator
-from auth.light_identity import ensure_user
+# router/memories.py
+import os
+from typing import Optional, List, Dict, Any
+
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, Field
+
+from vendors.supabase_client import get_client
+from vendors.pinecone_client import get_index
+from ingest.pipeline import upsert_memories_from_chunks, normalize_text
+from auth.light_identity import ensure_user  # attribution
 
 router = APIRouter()
-_ALLOWED_TYPES = {"episodic", "semantic", "procedural"}
 
-# ---------- Pydantic payload (accepts extras but ignores them) ----------
-
-class MemoryUpsertIn(BaseModel):
-    type: Literal["episodic", "semantic", "procedural"]
+class UpsertReq(BaseModel):
+    type: str = Field(..., pattern="^(semantic|episodic|procedural)$")
     title: Optional[str] = None
+    text: str
+    tags: Optional[List[str]] = None
+    role_view: Optional[List[str]] = None
+    source: Optional[str] = "chat"
+    file_id: Optional[str] = None
 
-    # Accept 'text' normally; also tolerate 'value' by coalescing it into text.
-    text: Optional[str] = Field(default=None)
-    value: Optional[str] = Field(default=None)
+class UpsertResp(BaseModel):
+    memory_id: Optional[str] = None
+    embedding_id: Optional[str] = None
 
-    tags: List[str] = Field(default_factory=list)
-    role_view: List[str] = Field(default_factory=list)
-    source: Optional[str] = Field(default="chat")
-
-    @root_validator(pre=True)
-    def coalesce_text(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        # Prefer explicit 'text'; else take 'value'
-        raw = values.get("text") or values.get("value")
-        if not raw or not str(raw).strip():
-            raise ValueError("Either 'text' or 'value' must be provided and non-empty.")
-        values["text"] = str(raw)
-        return values
-
-    @validator("tags", "role_view", pre=True)
-    def listify(cls, v):
-        if v is None:
-            return []
-        if isinstance(v, str):
-            return [t.strip() for t in v.split(",") if t.strip()]
-        if isinstance(v, list):
-            return [str(x).strip() for x in v if str(x).strip()]
-        return []
-
-    @validator("source", pre=True)
-    def normalize_source(cls, v):
-        s = (v or "chat").strip().lower()
-        return s if s in {"upload", "ingest", "chat", "wiki"} else "chat"
-
-    class Config:
-        extra = "ignore"  # ← silently ignore unknown keys like role_metadata
-
-# ---------- Helpers ----------
-
-def _norm_text(s: str) -> str:
-    s = re.sub(r"[ \t]+", " ", s or "")
-    s = re.sub(r"\s+\n", "\n", s).strip()
-    return s
-
-def _now_iso() -> str:
-    return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
-
-def _resp_data(resp) -> List[Dict[str, Any]]:
-    if resp is None: return []
-    if hasattr(resp, "data"):  # supabase-py v2
-        return resp.data or []
-    if isinstance(resp, dict):
-        return resp.get("data") or []
-    return []
-
-# ---------- Core logic shared by all route aliases ----------
-
-async def _memories_upsert_core(request: Request, x_api_key: Optional[str], x_user_email: Optional[str] = Header(None),) -> Dict[str, Any]:
-    # Optional API key
+def _auth(x_api_key: Optional[str]):
     expected = os.getenv("X_API_KEY")
     if expected and x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Parse & validate body
-    try:
-        data = await request.json()
-        payload = MemoryUpsertIn.parse_obj(data)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid payload: {e}")
-
-    mem_type = payload.type
-    title = (payload.title or "").strip()
-    text = _norm_text(payload.text)
-    tags = payload.tags
-    role_view = payload.role_view
-    source = payload.source
-
-    dedupe_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-    # Supabase client
-    try:
-        from vendors.supabase_client import get_client
-        sb = get_client()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase client not available: {e}")
-
-    # 1) Check duplicate
-    try:
-        existing = sb.table("memories").select("id, embedding_id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
-        rows = _resp_data(existing)
-        if rows:
-            memory_id = rows[0]["id"]
-            existing_embedding = rows[0].get("embedding_id")
-            is_duplicate = True
-        else:
-            is_duplicate = False
-            # Decide which DB column to write the text into:
-            # default = 'text'; set MEMORIES_TEXT_COLUMN=value if your schema uses 'value' instead
-            text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or "text").strip().lower()
-
-            base_payload = {
-                "type": mem_type,
-                "title": title or None,
-                text_col: text,              # write into 'text' or 'value'
-                "tags": tags,
-                "source": source,
-                "role_view": role_view,
-                "dedupe_hash": dedupe_hash,
-                author_user_id=author_user_id,
-            }
-
-            # INSERT (no .select() chaining)
-            sb.table("memories").insert(base_payload).execute()
-
-            # SELECT the new row id
-            fetched = sb.table("memories").select("id").eq("dedupe_hash", dedupe_hash).limit(1).execute()
-            frows = _resp_data(fetched)
-            if not frows:
-                raise RuntimeError("Insert succeeded but follow-up select returned no rows")
-            memory_id = frows[0]["id"]
-            existing_embedding = None
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase upsert error: {e}")
-
-    # 2) Embedding (best-effort)
-    embedded = False
-    embedding_vec = None
-    vector_id = None
-    try:
-        embed_model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-        # Only embed if new OR duplicate without embedding_id set
-        if (not is_duplicate) or (is_duplicate and not existing_embedding):
-            from openai import OpenAI
-            oai = OpenAI()
-            kwargs = {"model": embed_model, "input": text}
-            if os.getenv("EMBED_DIM"):
-                kwargs["dimensions"] = int(os.getenv("EMBED_DIM"))
-            eresp = oai.embeddings.create(**kwargs)
-            embedding_vec = eresp.data[0].embedding
-            embedded = True
-    except Exception:
-        embedded = False  # DB row still saved
-
-    # 3) Pinecone upsert (best-effort)
-    pinecone_upserted = False
-    try:
-        if embedding_vec:
-            from vendors.pinecone_client import get_index
-            index = get_index()
-            vector_id = f"mem_{memory_id}"
-            namespace = {"semantic":"semantic","episodic":"episodic","procedural":"procedural"}[mem_type]
-            metadata = {
-                "type": mem_type,
-                "title": title,
-                "tags": tags,
-                "created_at": _now_iso(),
-                "role_view": role_view,
-                "entity_ids": [],
-                "source": source,
-                "reason": "primary",
-            }
-            index.upsert(
-                vectors=[{"id": vector_id, "values": embedding_vec, "metadata": metadata}],
-                namespace=namespace,
-            )
-            pinecone_upserted = True
-            try:
-                sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
-            except Exception:
-                pass
-    except Exception:
-        pinecone_upserted = False
-
-    return {
-        "memory_id": memory_id,
-        "embedding_id": vector_id or existing_embedding,
-        "duplicate": is_duplicate,
-        "embedded": embedded,
-        "pinecone_upserted": pinecone_upserted,
-    }
-
-# Canonical PRD path
-@router.post("/memories/upsert")
-async def memories_upsert(request: Request, x_api_key: Optional[str] = Header(None)):
-    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
-
-# Aliases for connector-generated names (avoid 404s)
-@router.post("/memories_upsert_post", include_in_schema=False)
-async def memories_upsert_alias_post(request: Request, x_api_key: Optional[str] = Header(None)):
-    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
-
-@router.post("/memories_upsert", include_in_schema=False)
-async def memories_upsert_alias(request: Request, x_api_key: Optional[str] = Header(None)):
-    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
-
-@router.post("/memories/upsert/", include_in_schema=False)
-async def memories_upsert_slash(request: Request, x_api_key: Optional[str] = Header(None)):
-    return JSONResponse(await _memories_upsert_core(request, x_api_key), status_code=200)
-
-from fastapi import Path
-
-@router.get("/memories/{memory_id}")
-def get_memory(memory_id: str = Path(...), x_api_key: Optional[str] = Header(None)):
-    expected = os.getenv("X_API_KEY")
-    if expected and x_api_key != expected:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    from vendors.supabase_client import get_client
+@router.post("/memories/upsert", response_model=UpsertResp)
+def memories_upsert_post(
+    body: UpsertReq,
+    x_api_key: Optional[str] = Header(None),
+    x_user_email: Optional[str] = Header(None),
+):
+    _auth(x_api_key)
     sb = get_client()
-    text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or "text").strip().lower()
-    cols = f"id,type,title,tags,role_view,source,created_at,updated_at,embedding_id,{text_col}"
-    rs = sb.table("memories").select(cols).eq("id", memory_id).limit(1).execute()
-    data = rs.data if hasattr(rs, "data") else rs.get("data")
-    if not data:
-        raise HTTPException(status_code=404, detail="memory not found")
+    index = get_index()
+    author_user_id = ensure_user(sb=sb, email=x_user_email)
 
-    row = data[0]
-    # normalize API shape: always return "text" key regardless of DB column name
-    row["text"] = row.pop(text_col, None)
-    return row
+    # Use pipeline to reuse dedupe/embedding logic
+    res = upsert_memories_from_chunks(
+        sb=sb,
+        pinecone_index=index,
+        embedder=None,
+        file_id=body.file_id,
+        title_prefix=body.title or "Note",
+        chunks=[normalize_text(body.text)],
+        mem_type=body.type,
+        tags=body.tags or [],
+        role_view=body.role_view or [],
+        source=body.source or "chat",
+        text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+        author_user_id=author_user_id,  # <-- colon in dicts is correct; this is a keyword arg here
+    )
 
+    # prefer newly created id if present; else updated id if any
+    mem_id = None
+    if res.get("upserted"):
+        mem_id = res["upserted"][0].get("memory_id")
+    elif res.get("updated"):
+        mem_id = res["updated"][0].get("memory_id")
+
+    return {"memory_id": mem_id, "embedding_id": f"mem_{mem_id}" if mem_id else None}
