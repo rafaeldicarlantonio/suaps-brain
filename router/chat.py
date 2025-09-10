@@ -14,6 +14,7 @@ from vendors.pinecone_client import get_index, safe_query
 from ingest.pipeline import normalize_text  # used in context packing
 from memory.autosave import apply_autosave
 from guardrails.redteam import review_answer
+from auth.light_identity import ensure_user
 
 router = APIRouter()
 client = OpenAI()
@@ -160,27 +161,34 @@ def _answer_json(prompt: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 # ---------- Route ----------
 @router.post("/chat", response_model=ChatResp)
-def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None)):
+def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None), x_user_email: Optional[str] = Header(None)):
     _auth(x_api_key)
     sb = get_client()
+    author_user_id = ensure_user(sb=sb, email=x_user_email)
     index = get_index()
     t0 = datetime.datetime.utcnow()
 
     # 1) Ensure a session id without relying on created_at
     session_id = body.session_id
     if not session_id:
-        session_id = str(uuid4())
-        try:
-            sb.table("sessions").insert({"id": session_id, "title": None}).execute()
-        except Exception:
-            # best-effort fallback: let DB generate id
+        session_payload = {"title": None}
+        if author_user_id:  # only if column exists; if not, Supabase will error — so guard it
             try:
-                ins = sb.table("sessions").insert({"title": None}).execute()
-                data = ins.data if hasattr(ins, "data") else ins.get("data") or []
-                if data and isinstance(data, list) and data[0].get("id"):
-                    session_id = data[0]["id"]
-            except Exception:
-                pass
+                session_payload["user_id"] = author_user_id
+             except Exception:
+                 pass
+        try:
+            sb.table("sessions").insert(session_payload).execute()
+            # fetch the id we just created
+            sel = sb.table("sessions").select("id").order("created_at", desc=True).limit(1).execute()
+            data = sel.data if hasattr(sel, "data") else sel.get("data") or []
+            if data:
+                session_id = data[0]["id"]
+        except Exception:
+            # very defensive fallback: generate a local uuid
+            from uuid import uuid4
+            session_id = session_id or str(uuid4())
+
 
     # 2) Retrieval
     retrieved_meta = _retrieve(sb, index, body.prompt, top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8")))
@@ -218,6 +226,7 @@ def chat_chat_post(body: ChatReq, x_api_key: Optional[str] = Header(None)):
             candidates=draft.get("autosave_candidates") or [],
             session_id=session_id,
             text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+            author_user_id=author_user_id,
         )
     except Exception:
         autosave = {"saved": False, "items": []}
