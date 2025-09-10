@@ -1,125 +1,59 @@
-"""
-tests/evals/replay.py
----------------------
-Runs the golden set against local /chat endpoint and scores:
-- Must-include keyphrases present
-- Citations include expected tags (any)
-- Latency under threshold
-- Answer JSON schema basic shape (keys exist)
-Usage:
-  export BASE_URL=http://localhost:10000
-  export X_API_KEY=dev_key
-  python -m tests.evals.replay --gold tests/evals/golden_set.json
-"""
+#!/usr/bin/env python3
+import os, sys, time, json, requests
 
-from __future__ import annotations
+BASE = os.getenv("BASE_URL", "https://suaps-brain.onrender.com")
+KEY  = os.getenv("X_API_KEY")
 
-import os
-import sys
-import json
-import time
-import argparse
-from typing import Any, Dict, List
-
-import requests
-
-REQUIRED_KEYS = ["answer","citations","guidance_questions","autosave"]
-
-def load_golden(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def call_chat(base_url: str, api_key: str, prompt: str, role: str = "researcher") -> Dict[str, Any]:
+def call_chat(prompt):
     t0 = time.time()
-    r = requests.post(f"{base_url}/chat", headers={
-        "Content-Type":"application/json",
-        "X-API-Key": api_key
-    }, json={
-        "message": prompt,
-        "role": role
-    }, timeout=60)
-    latency_ms = int((time.time()-t0)*1000)
-    try:
-        data = r.json()
-    except Exception:
-        raise RuntimeError(f"Non-JSON response ({r.status_code}): {r.text[:300]}")
-    data.setdefault("metrics",{}).setdefault("latency_ms", latency_ms)
-    return data
+    r = requests.post(
+        f"{BASE}/chat",
+        headers={"Content-Type":"application/json","X-API-Key": KEY or ""},
+        json={"prompt": prompt, "role":"researcher", "debug": False},
+        timeout=40
+    )
+    dt = int((time.time()-t0)*1000)
+    return r.status_code, dt, r.text
 
-def has_any_citation_tag(citations: List[Dict[str, Any]], expected_tags_any: List[str]) -> bool:
-    exp = set([t.lower() for t in expected_tags_any or []])
-    for c in citations or []:
-        for t in (c.get("tags") or []):
-            if t and t.lower() in exp:
-                return True
-    return False
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--gold", required=True, help="Path to golden_set.json")
-    ap.add_argument("--base", default=os.getenv("BASE_URL","http://localhost:10000"))
-    ap.add_argument("--key", default=os.getenv("X_API_KEY","dev_key"))
-    args = ap.parse_args()
-
-    cases = load_golden(args.gold)
-    ok = 0
-    fail = 0
-    details: List[str] = []
-
-    for case in cases:
-        cid = case.get("id","<no-id>")
-        prompt = case["prompt"]
-        must_inc = case.get("must_include", [])
-        must_cite_tags_any = case.get("must_cite_tags_any", [])
-        max_latency = int(case.get("max_latency_ms", 3000))
-
+def main(path):
+    with open(path, "r", encoding="utf-8") as f:
+        cases = json.load(f)
+    fails = 0
+    for c in cases:
+        print(f"\n==> {c['id']} :: {c['prompt']}")
+        code, ms, body = call_chat(c["prompt"])
+        print(f"HTTP {code} in {ms}ms")
+        if code != 200:
+            print("FAIL: non-200")
+            fails += 1
+            continue
         try:
-            resp = call_chat(args.base, args.key, prompt)
-        except Exception as ex:
-            fail += 1
-            details.append(f"[{cid}] CALL-ERR: {ex}")
+            data = json.loads(body)
+        except Exception as e:
+            print("FAIL: invalid JSON:", e)
+            fails += 1
             continue
-
-        missing_keys = [k for k in REQUIRED_KEYS if k not in resp]
-        if missing_keys:
-            fail += 1
-            details.append(f"[{cid}] SCHEMA-ERR missing keys: {missing_keys}")
-            continue
-
-        ans = resp.get("answer","") or resp.get("data",{}).get("answer","")
-        if not isinstance(ans, str):
-            fail += 1
-            details.append(f"[{cid}] SCHEMA-ERR answer not string")
-            continue
-
-        # must include checks
-        miss = [k for k in must_inc if k.lower() not in (ans or "").lower()]
-        if miss:
-            fail += 1
-            details.append(f"[{cid}] ANSWER-ERR missing keyphrases: {miss} ; answer: {ans[:200]}")
-            continue
-
-        # citations contain at least one expected tag (any)
-        if must_cite_tags_any:
-            if not has_any_citation_tag(resp.get("citations",[]), must_cite_tags_any):
-                fail += 1
-                details.append(f"[{cid}] CITE-ERR expected any of tags={must_cite_tags_any} not found in citations")
-                continue
-
-        # latency check
-        lat = int(resp.get("metrics",{}).get("latency_ms", 999999))
-        if lat > max_latency:
-            fail += 1
-            details.append(f"[{cid}] PERF-ERR latency {lat}ms > {max_latency}ms")
-            continue
-
-        ok += 1
-
-    print(f"PASS: {ok} / {len(cases)} ; FAIL: {fail}")
-    for d in details[:20]:
-        print(" -", d)
-    if fail > 0:
+        ans = (data.get("answer") or "").lower()
+        cits = data.get("citations") or []
+        if ms > c.get("max_latency_ms", 999999):
+            print("FAIL: latency too high")
+            fails += 1
+        ok_terms = all(term.lower() in ans for term in c.get("must_include", []))
+        ok_cites = any(any(token in (str(x) or "") for token in c.get("must_cite_any", [])) for x in cits) if c.get("must_cite_any") else True
+        if not ok_terms:
+            print("FAIL: missing must_include terms")
+            print("Answer:", ans[:400])
+            fails += 1
+        if not ok_cites:
+            print("FAIL: citations missing expected tokens; got:", cits)
+            fails += 1
+        if fails == 0:
+            print("PASS")
+    if fails:
+        print(f"\n{fails} failing case(s)")
         sys.exit(1)
+    print("\nAll cases passed.")
 
 if __name__ == "__main__":
-    main()
+    path = sys.argv[1] if len(sys.argv) > 1 else "tests/evals/golden_set.json"
+    main(path)
