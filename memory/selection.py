@@ -16,6 +16,20 @@ def _recency_score(created_at: Optional[str], half_life_days: int = int(os.geten
     except Exception:
         return 0.5
 
+def cross_layer_boost(chunks):
+    boosted = []
+    for i, c1 in enumerate(chunks):
+        for j, c2 in enumerate(chunks):
+            if i >= j:
+                continue
+            # If they come from different layers but share entity_ids
+            if c1["type"] != c2["type"] and set(c1["entity_ids"]) & set(c2["entity_ids"]):
+                c1["score"] += 0.1
+                c2["score"] += 0.1
+        boosted.append(c1)
+    return boosted
+
+
 def rank_and_pack_minimal(hits: List[Dict[str,Any]], records: List[Dict[str,Any]], wm_msgs: List[Dict[str,Any]], prompt: str) -> Dict[str,Any]:
     # Map embedding_id -> record
     rec_by_emb = { (r.get("embedding_id") or r.get("id")): r for r in records }
