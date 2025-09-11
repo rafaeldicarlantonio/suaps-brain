@@ -139,29 +139,30 @@ def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _answer_json(prompt: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:
-    sys = "You are SUAPS Brain. Return strict JSON with keys: answer, citations, guidance_questions, autosave_candidates."
-    compact_ctx = [{"id": c["id"], "title": c["title"], "text": c["text"][:2000]} for c in context[:8]]
-    user = json.dumps({"question": prompt, "context": compact_ctx})
+def _answer_json(prompt: str, context_str: str) -> Dict[str, Any]:
+    sys = """You are SUAPS Brain. Be concise and specific. Mentor tone: strategic, supportive.
+    Always ground answers in SUAPS data. Cite the memory IDs you used.
+
+    You will see different types of memory in context:
+    - [SEMANTIC MEMORY]: definitions, background knowledge.
+    - [EPISODIC MEMORY]: time-stamped events, meetings, decisions.
+    - [PROCEDURAL MEMORY]: rules, SOPs, how-to steps.
+
+    Use each type appropriately: semantic for explanations, episodic for timelines, procedural for rules.
+
+    Return STRICT JSON only with this schema:
+    {...}
+    """
+
+    user = json.dumps({"question": prompt, "context": context_str})
     r = client.chat.completions.create(
         model=os.getenv("CHAT_MODEL", "gpt-4.1-mini"),
         messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
         temperature=0,
     )
     raw = r.choices[0].message.content or "{}"
-    try:
-        return json.loads(raw)
-    except Exception:
-        r2 = client.chat.completions.create(
-            model=os.getenv("CHAT_MODEL", "gpt-4.1-mini"),
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user},
-                {"role": "system", "content": "Return VALID JSON only. No prose."},
-            ],
-            temperature=0,
-        )
-        return json.loads(r2.choices[0].message.content or "{}")
+    return json.loads(raw)
+
 
 
 # ---------- Route ----------
