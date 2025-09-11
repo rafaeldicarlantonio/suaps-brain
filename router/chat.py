@@ -196,37 +196,40 @@ def chat_chat_post(
             # Local fallback
             session_id = str(uuid4())
 
-    # Retrieval
-retrieved_meta = _retrieve(
-    sb,
-    index,
-    body.prompt,
-    top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8"))
-)
-retrieved_chunks = _pack_context(sb, retrieved_meta)
+       # Retrieval
+    retrieved_meta = _retrieve(
+        sb,
+        index,
+        body.prompt,
+        top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8"))
+    )
+    retrieved_chunks = _pack_context(sb, retrieved_meta)
 
-# Build context string with memory-type labels
-context_for_llm = "\n".join(chunk["text"] for chunk in retrieved_chunks)
+    # Build context string with memory-type labels
+    context_for_llm = "\n".join(chunk["text"] for chunk in retrieved_chunks)
 
-# Collect just the IDs (for schema validation of "citations")
-context_ids = [chunk["id"] for chunk in retrieved_chunks]
+    # Collect just the IDs (for schema validation of "citations")
+    context_ids = [chunk["id"] for chunk in retrieved_chunks]
 
-# Answer
-draft = _answer_json(body.prompt, context_for_llm)
+    # Answer
+    draft = _answer_json(body.prompt, context_for_llm)
 
-if not isinstance(draft, dict):
-    raise HTTPException(status_code=500, detail="Answerer returned non-JSON")
+    if not isinstance(draft, dict):
+        raise HTTPException(status_code=500, detail="Answerer returned non-JSON")
 
-# Ensure citations are always a list of strings (ids only)
-if "citations" in draft and isinstance(draft["citations"], list):
-    draft["citations"] = [
-        c if isinstance(c, str) else c.get("id") for c in draft["citations"]
-    ]
-
+    # Ensure citations are always a list of strings (ids only)
+    if "citations" in draft and isinstance(draft["citations"], list):
+        draft["citations"] = [
+            c if isinstance(c, str) else c.get("id") for c in draft["citations"]
+        ]
 
     # Red-team (non-fatal)
     try:
-        verdict = review_answer(draft_json=draft, prompt=body.prompt, retrieved_chunks=retrieved_chunks) or {}
+        verdict = review_answer(
+            draft_json=draft,
+            prompt=body.prompt,
+            retrieved_chunks=retrieved_chunks
+        ) or {}
     except Exception:
         verdict = {"action": "allow", "reasons": []}
     action = (verdict.get("action") or "allow").lower()
