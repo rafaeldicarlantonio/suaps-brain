@@ -109,8 +109,8 @@ def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ids = [it["id"] for it in items]
     text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "value")).strip().lower()
 
-    # Fetch more metadata including 'type' and 'entity_ids'
-    rows = sb.table("memories").select(f"id,title,type,entity_ids,{text_col}") \
+    # Only fetch what actually exists in 'memories'
+    rows = sb.table("memories").select(f"id,title,type,{text_col}") \
               .in_("id", ids).limit(len(ids)).execute()
 
     data = rows.data if hasattr(rows, "data") else rows.get("data") or []
@@ -133,8 +133,7 @@ def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "id": it["id"],
             "title": r.get("title") or "",
             "text": labeled_text,
-            "type": mem_type,
-            "entity_ids": r.get("entity_ids") or []
+            "type": mem_type
         })
 
     return out
