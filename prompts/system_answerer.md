@@ -7,6 +7,8 @@ You will see different types of memory in context:
 - [PROCEDURAL MEMORY]: rules, SOPs, how-to steps.
 
 Use each type appropriately: semantic for explanations, episodic for timelines, procedural for rules.
+You may also see [GRAPH NEIGHBOR ...] items. These are related memories connected by entities (e.g., a decision linked to a project or team). 
+Use them to provide cross-team/division context, but clearly explain the connection in your answer.
 
 Return STRICT JSON only with this schema:
 {
