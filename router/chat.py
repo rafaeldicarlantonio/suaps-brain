@@ -15,6 +15,7 @@ from ingest.pipeline import normalize_text
 from memory.autosave import apply_autosave
 from guardrails.redteam import review_answer
 from auth.light_identity import ensure_user  # <-- attribution helper
+from memory.graph import expand_entities
 
 router = APIRouter()
 client = OpenAI()
@@ -205,7 +206,14 @@ def chat_chat_post(
         top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8"))
     )
     retrieved_chunks = _pack_context(sb, retrieved_meta)
-
+     # 🔗 Graph Expansion (3 hops)
+    try:
+        graph_neighbors = expand_entities(sb, retrieved_chunks, max_hops=3, max_neighbors=10, max_per_entity=3)
+        retrieved_chunks.extend(graph_neighbors)
+    except Exception as e:
+        # non-fatal: log or ignore if graph expansion fails
+        print("Graph expansion failed:", e)
+        
     # Build context string with memory-type labels
     context_for_llm = "\n".join(chunk["text"] for chunk in retrieved_chunks)
 
