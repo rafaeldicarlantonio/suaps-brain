@@ -105,17 +105,38 @@ def _retrieve(sb, index, query: str, top_k_per_type: int = 8) -> List[Dict[str, 
 def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not items:
         return []
+
     ids = [it["id"] for it in items]
     text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "value")).strip().lower()
-    rows = sb.table("memories").select(f"id,title,{text_col}").in_("id", ids).limit(len(ids)).execute()
+
+    # Fetch more metadata including 'type' and 'entity_ids'
+    rows = sb.table("memories").select(f"id,title,type,entity_ids,{text_col}") \
+              .in_("id", ids).limit(len(ids)).execute()
+
     data = rows.data if hasattr(rows, "data") else rows.get("data") or []
     by_id = {r["id"]: r for r in data}
+
     out: List[Dict[str, Any]] = []
     for it in items:
         r = by_id.get(it["id"])
         if not r:
             continue
-        out.append({"id": it["id"], "title": r.get("title") or "", "text": normalize_text(r.get(text_col) or "")})
+
+        mem_type = (r.get("type") or "semantic").upper()
+        raw_text = r.get(text_col) or ""
+        norm_text = normalize_text(raw_text)
+
+        # Label the text with its memory type
+        labeled_text = f"[{mem_type} MEMORY] {norm_text}"
+
+        out.append({
+            "id": it["id"],
+            "title": r.get("title") or "",
+            "text": labeled_text,
+            "type": mem_type,
+            "entity_ids": r.get("entity_ids") or []
+        })
+
     return out
 
 
