@@ -46,6 +46,8 @@ def _save_memory(
     return None
 
 
+# --- REPLACE your apply_autosave() with this version ---
+
 def apply_autosave(
     *,
     sb,
@@ -57,57 +59,60 @@ def apply_autosave(
 ) -> Dict[str, Any]:
     """
     Process autosave candidates:
-      • Runs importance classification.
-      • Applies confidence & importance thresholds.
-      • Optionally flags borderline items for user review.
+      • LLM-based importance classification.
+      • Entity-specific thresholding (stricter than general facts).
+      • Splits 'review' vs 'skipped' so borderline items aren't lost.
       • Saves high-quality memories via the ingest pipeline.
     """
     thr_fact = float(os.getenv("AUTOSAVE_CONF_THRESHOLD", "0.75"))
-    thr_ent = float(os.getenv("AUTOSAVE_ENTITY_CONF_THRESHOLD", "0.85"))
+    thr_ent  = float(os.getenv("AUTOSAVE_ENTITY_CONF_THRESHOLD", "0.85"))
 
-    saved, skipped, review = [], [], []
+    saved: List[Dict[str, Any]] = []
+    review: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
 
-    for c in candidates or []:
-        ftype = (c.get("fact_type") or "").lower()
-        conf = float(c.get("confidence") or 0)
-        text = normalize_text(c.get("text") or "")
+    for c in (candidates or []):
+        ftype = (c.get("fact_type") or "").lower()           # decision|deadline|procedure|entity
+        conf  = float(c.get("confidence") or 0.0)
+        text  = normalize_text(c.get("text") or "")
         title = c.get("title") or ftype.title()
-        tags = c.get("tags") or []
+        tags  = c.get("tags") or []
 
         if not text or not ftype:
             skipped.append({"reason": "missing_fields", "title": title})
             continue
 
-        # 🔎 Run LLM-based importance classification
-        importance_info = classify_importance(c)
-        importance = importance_info.get("importance", "low")
-        importance_score = float(importance_info.get("importance_score", 0.0))
+        # 🔎 Importance classification (adds c.importance & c.importance_score)
+        imp = classify_importance(c)
+        c["importance"] = imp.get("importance", "low")
+        c["importance_score"] = float(imp.get("importance_score", 0.0))
 
-        # Add importance metadata
-        c["importance"] = importance
-        c["importance_score"] = importance_score
-
-        # Decide save vs review vs skip
-        if importance == "high" and conf >= thr_fact:
-            mem = _save_memory(
-                sb=sb,
-                pinecone_index=pinecone_index,
-                candidate=c,
-                session_id=session_id,
-                text_col_env=text_col_env,
-                author_user_id=author_user_id,
-            )
-            if mem:
-                saved.append(mem)
-        elif importance == "medium" or (0.6 <= conf < thr_fact):
-            # Flag for user confirmation
-            c["review_required"] = True
-            skipped.append(c)
+        # --- Threshold policy ---
+        # entities need higher confidence than general facts
+        # general facts gate at thr_fact
+        if ftype == "entity":
+            if c["importance"] == "high" and conf >= thr_ent:
+                mem = _save_memory(sb, pinecone_index, c, session_id, text_col_env, author_user_id)
+                if mem: saved.append(mem)
+            elif c["importance"] == "medium" or (0.6 <= conf < thr_ent):
+                c["review_required"] = True
+                review.append(c)
+            else:
+                skipped.append({"reason": "low_conf_entity", "title": title})
         else:
-            skipped.append({"reason": f"low_conf_{ftype}", "title": title})
+            if c["importance"] == "high" and conf >= thr_fact:
+                mem = _save_memory(sb, pinecone_index, c, session_id, text_col_env, author_user_id)
+                if mem: saved.append(mem)
+            elif c["importance"] == "medium" or (0.6 <= conf < thr_fact):
+                c["review_required"] = True
+                review.append(c)
+            else:
+                skipped.append({"reason": f"low_conf_{ftype}", "title": title})
 
     return {
         "saved": bool(saved),
         "items": saved,
+        "review": review,     # ⬅️ NEW: borderline items separated from 'skipped'
         "skipped": skipped,
     }
+
