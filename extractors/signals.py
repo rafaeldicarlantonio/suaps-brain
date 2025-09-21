@@ -1,5 +1,5 @@
 # extractors/signals.py
-import os, json, hashlib
+import os, json
 from typing import List, Dict, Any
 from openai import OpenAI
 
@@ -31,7 +31,7 @@ def _safe_load_json(s: str) -> Dict[str, Any]:
 
 def extract_signals_from_text(title: str, text: str) -> Dict[str, List[Dict[str, Any]]]:
     if not text or not text.strip():
-        return {"decisions": [], "deadlines": [], "procedures": [], "entities": []}
+        return {"candidates": [], "raw": {"decisions": [], "deadlines": [], "procedures": [], "entities": []}}
 
     model = os.getenv("EXTRACTOR_MODEL", "gpt-4.1-mini")
     payload = f"Title: {title}\n\nText:\n{text[:200000]}"  # safety cap
@@ -45,7 +45,6 @@ def extract_signals_from_text(title: str, text: str) -> Dict[str, List[Dict[str,
     raw = resp.choices[0].message.content or "{}"
     data = _safe_load_json(raw)
 
-    # Normalize to unified candidate format for autosave
     candidates: List[Dict[str, Any]] = []
 
     for d in data.get("decisions", []):
@@ -58,7 +57,6 @@ def extract_signals_from_text(title: str, text: str) -> Dict[str, List[Dict[str,
         })
 
     for d in data.get("deadlines", []):
-        # include date/owner inside text for now
         date = (d.get("date") or "").strip()
         owner = (d.get("owner") or "").strip()
         line = d.get("text") or ""
@@ -86,7 +84,6 @@ def extract_signals_from_text(title: str, text: str) -> Dict[str, List[Dict[str,
             "confidence": float(p.get("confidence") or 0.0),
         })
 
-    # Optional: create entity “notes” so they can be promoted via autosave if important
     for e in data.get("entities", []):
         summary = e.get("text") or e.get("title") or ""
         candidates.append({
