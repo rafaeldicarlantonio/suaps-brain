@@ -16,6 +16,7 @@ from memory.autosave import apply_autosave
 from guardrails.redteam import review_answer
 from auth.light_identity import ensure_user  # <-- attribution helper
 from memory.graph import expand_entities
+from extractors.signals import extract_signals_from_text  # <-- NEW: fallback extractor
 
 router = APIRouter()
 client = OpenAI()
@@ -198,7 +199,7 @@ def chat_chat_post(
             # Local fallback
             session_id = str(uuid4())
 
-       # Retrieval
+    # Retrieval
     retrieved_meta = _retrieve(
         sb,
         index,
@@ -206,14 +207,15 @@ def chat_chat_post(
         top_k_per_type=int(os.getenv("TOPK_PER_TYPE", "8"))
     )
     retrieved_chunks = _pack_context(sb, retrieved_meta)
-     # 🔗 Graph Expansion (3 hops)
+
+    # 🔗 Graph Expansion (3 hops) - non-fatal
     try:
         graph_neighbors = expand_entities(sb, retrieved_chunks, max_hops=3, max_neighbors=10, max_per_entity=3)
         retrieved_chunks.extend(graph_neighbors)
     except Exception as e:
         # non-fatal: log or ignore if graph expansion fails
         print("Graph expansion failed:", e)
-        
+
     # Build context string with memory-type labels
     context_for_llm = "\n".join(chunk["text"] for chunk in retrieved_chunks)
 
@@ -222,7 +224,6 @@ def chat_chat_post(
 
     # Answer
     draft = _answer_json(body.prompt, context_for_llm)
-
     if not isinstance(draft, dict):
         raise HTTPException(status_code=500, detail="Answerer returned non-JSON")
 
@@ -254,12 +255,36 @@ def chat_chat_post(
             "metrics": {"latency_ms": int((datetime.datetime.utcnow() - t0).total_seconds() * 1000)},
         }
 
-    # Autosave (non-fatal)
+    # -----------------------
+    # Autosave (non-fatal) with robust fallback
+    # -----------------------
     try:
+        # Prefer LLM-provided autosave candidates
+        candidates = (draft.get("autosave_candidates") or []).copy()
+
+        # If none, derive from USER + ASSISTANT + small CONTEXT sample
+        if not candidates:
+            sample_ctx = "\n\n".join(
+                [(c.get("text") or "")[:1200] for c in (retrieved_chunks[:2] if retrieved_chunks else [])]
+            )
+            fallback_text = (
+                f"USER:\n{(body.prompt or '')[:4000]}\n\n"
+                f"ASSISTANT:\n{(draft.get('answer') or '')[:4000]}\n\n"
+                f"CONTEXT:\n{sample_ctx}"
+            )
+            derived = extract_signals_from_text(fallback_text) or []
+
+            # Tag derived items with provenance + session for traceability
+            for d in derived:
+                tags = set(d.get("tags") or [])
+                tags.update({"source:chat", f"session:{session_id}"})
+                d["tags"] = sorted(list(tags))
+            candidates.extend(derived)
+
         autosave = apply_autosave(
             sb=sb,
             pinecone_index=index,
-            candidates=draft.get("autosave_candidates") or [],
+            candidates=candidates,
             session_id=session_id,
             text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
             author_user_id=author_user_id,  # pass attribution
