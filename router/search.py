@@ -3,7 +3,7 @@ import os
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, root_validator
 from openai import OpenAI
 
 from vendors.supabase_client import get_client
@@ -12,11 +12,22 @@ from vendors.pinecone_client import get_index, safe_query
 router = APIRouter()
 client = OpenAI()
 
+# ---------- Models ----------
 class SearchReq(BaseModel):
-    q: str
+    # Accept both 'q' and 'query' as the query string
+    q: Optional[str] = Field(default=None, description="Query string")
+    query: Optional[str] = Field(default=None, description="Alias for q")
+
     type: Optional[List[str]] = Field(default_factory=lambda: ["semantic", "episodic", "procedural"])
     top_k: int = Field(12, ge=1, le=50)
     include_text: bool = True
+
+    @root_validator(pre=True)
+    def unify_query(cls, values):
+        q = values.get("q")
+        query = values.get("query")
+        values["q"] = q or query
+        return values
 
 class SearchItem(BaseModel):
     id: str
@@ -28,22 +39,31 @@ class SearchItem(BaseModel):
 class SearchResp(BaseModel):
     items: List[SearchItem]
 
+# ---------- Auth helper ----------
 def _auth(x_api_key: Optional[str]):
     expected = os.getenv("X_API_KEY")
     if expected and x_api_key != expected:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+# ---------- Embedding helper ----------
 def _embed(text: str) -> List[float]:
-    kwargs: Dict[str, Any] = {"model": os.getenv("EMBED_MODEL", "text-embedding-3-small"), "input": text}
+    kwargs: Dict[str, Any] = {
+        "model": os.getenv("EMBED_MODEL", "text-embedding-3-small"),
+        "input": text,
+    }
     dim = os.getenv("EMBED_DIM")
     if dim:
         kwargs["dimensions"] = int(dim)
     er = client.embeddings.create(**kwargs)
     return er.data[0].embedding
 
+# ---------- Core semantic search ----------
 @router.post("/search/semantic", response_model=SearchResp)
 def search_semantic_post(body: SearchReq, x_api_key: Optional[str] = Header(None)):
     _auth(x_api_key)
+    if not body.q or not body.q.strip():
+        raise HTTPException(status_code=400, detail="Missing query string")
+
     sb = get_client()
     index = get_index()
 
@@ -87,3 +107,9 @@ def search_semantic_post(body: SearchReq, x_api_key: Optional[str] = Header(None
 
     out.sort(key=lambda x: x.get("score", 0.0), reverse=True)
     return {"items": out[: body.top_k]}
+
+# ---------- Aliases: make /search and /search/ work ----------
+@router.post("/search", response_model=SearchResp)
+@router.post("/search/", response_model=SearchResp)
+def search_post(body: SearchReq, x_api_key: Optional[str] = Header(None)):
+    return search_semantic_post(body, x_api_key)
