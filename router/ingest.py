@@ -80,7 +80,7 @@ def ingest_batch_ingest_batch_post(body: IngestBatchRequest, x_api_key: Optional
             tags=tags,
             role_view=role_view,
             source=source,
-            text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+            text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "text"),
             author_user_id=author_user_id,
         )
         all_upserted.extend(resp.get("upserted", []))
