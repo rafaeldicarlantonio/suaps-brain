@@ -84,7 +84,7 @@ async def upload_file(
         tags=tags_list,
         role_view=[],
         source="upload",
-        text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","value"),
+        text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","text"),
     )
 
     # Optional: also store fulltext as semantic
@@ -101,7 +101,7 @@ async def upload_file(
                 tags=list(set((tags_list or []) + ["fulltext"])),
                 role_view=[],
                 source="upload",
-                text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","value"),
+                text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","text"),
             )
         except Exception as e:
             print("Fulltext semantic upsert skipped:", e)
@@ -156,7 +156,7 @@ async def upload_file(
                     pinecone_index=pinecone_index,
                     candidates=candidates,
                     session_id=None,
-                    text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","value"),
+                    text_col_env=os.getenv("MEMORIES_TEXT_COLUMN","text"),
                     author_user_id=None,
                 ) or autosave_summary
             except Exception as ae:
