@@ -158,7 +158,7 @@ def upsert_memories_from_chunks(
     tags: Optional[List[str]] = None,
     role_view: Optional[List[str]] = None,
     source: str = "upload",
-    text_col_env: str = "value",
+    text_col_env: str = "text",
     author_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
