@@ -53,7 +53,7 @@ def memories_upsert_post(
         tags=body.tags or [],
         role_view=body.role_view or [],
         source=body.source or "chat",
-        text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+        text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "text"),
         author_user_id=author_user_id,  # <-- colon in dicts is correct; this is a keyword arg here
     )
 
