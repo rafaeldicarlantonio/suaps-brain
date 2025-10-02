@@ -109,7 +109,7 @@ def _pack_context(sb, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return []
 
     ids = [it["id"] for it in items]
-    text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "value")).strip().lower()
+    text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "text")).strip().lower()
 
     # Only fetch what actually exists in 'memories'
     rows = sb.table("memories").select(f"id,title,type,{text_col}") \
@@ -286,7 +286,7 @@ def chat_chat_post(
             pinecone_index=index,
             candidates=candidates,
             session_id=session_id,
-            text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "value"),
+            text_col_env=os.getenv("MEMORIES_TEXT_COLUMN", "text"),
             author_user_id=author_user_id,  # pass attribution
         )
     except Exception:
