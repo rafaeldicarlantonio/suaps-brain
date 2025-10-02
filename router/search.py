@@ -61,7 +61,7 @@ def search_semantic_post(body: SearchReq, x_api_key: Optional[str] = Header(None
             matches.append({"memory_id": mem_id, "type": t, "score": float(m.score or 0.0)})
 
     ids = list({m["memory_id"] for m in matches})
-    text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "value")).strip().lower()
+    text_col = (os.getenv("MEMORIES_TEXT_COLUMN", "text")).strip().lower()
     by_id: Dict[str, Dict[str, Any]] = {}
 
     if ids:
