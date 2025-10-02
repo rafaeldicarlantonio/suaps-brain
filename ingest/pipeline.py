@@ -169,7 +169,7 @@ def upsert_memories_from_chunks(
     """
     tags = tags or []
     role_view = role_view or []
-    text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or text_col_env).strip().lower()
+    text_col = (os.getenv("MEMORIES_TEXT_COLUMN") or text_col_env or "text").strip().lower()
     mode = (os.getenv("UPSERT_MODE", "update")).lower()
     sim_thresh = int(os.getenv("SIMHASH_DISTANCE", "6"))
 
