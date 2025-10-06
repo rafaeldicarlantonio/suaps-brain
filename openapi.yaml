@@ -1,9 +1,11 @@
 openapi: 3.1.0
 info:
   title: SUAPS Brain API
-  version: '1.0.0'
+  version: "1.0.0"
 servers:
   - url: https://suaps-brain.onrender.com
+security:
+  - ApiKeyAuth: []
 
 components:
   securitySchemes:
@@ -12,134 +14,347 @@ components:
       in: header
       name: X-API-Key
 
-# Apply API key to everything by default…
-security:
-  - ApiKeyAuth: []
+  schemas:
+    ChatRequest:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Unique identifier for the chat session
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        messages:
+          type: array
+          description: Conversation history in structured format
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        prompt:
+          type: string
+          description: Optional system prompt to guide the response
+          example: "Answer as a scientific mentor for SUAPS"
+      required: [session_id, messages]
+
+    ChatMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+          description: Role of the message sender
+        content:
+          type: string
+          description: Text content of the message
+      required: [role, content]
+      example:
+        role: user
+        content: "What are the main goals of SUAPS?"
+
+    ChatResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+          description: SUAPS Brain’s response to the user
+        citations:
+          type: array
+          description: List of cited document IDs or sources
+          items:
+            type: string
+          example: ["doc:suaps_roadmap.pdf#p2", "mem_12345"]
+
+    # ---------- NEW: Search request/response ----------
+    SearchRequest:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Search string for semantic/hybrid retrieval
+          example: "company goals for ClickUp setup"
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 8
+          description: Number of results to return
+        namespace:
+          type: string
+          description: Vector index namespace (e.g., domain, tenant)
+          example: "suaps-default"
+        include_types:
+          type: array
+          description: Restrict to certain content types
+          items:
+            type: string
+            enum: [document, memory, note, page, transcript, web]
+        metadata_filter:
+          type: object
+          description: Key/value filters applied before retrieval (exact match or simple operators)
+          additionalProperties: true
+          example:
+            source: "clickup"
+            project: "company-ops"
+            lang: "en"
+        hybrid_alpha:
+          type: number
+          description: 0..1 blend for dense vs sparse (0=dense only, 1=sparse only)
+          minimum: 0
+          maximum: 1
+          default: 0.3
+        min_score:
+          type: number
+          description: Filter out results below this similarity score
+          example: 0.25
+        page_token:
+          type: string
+          description: Opaque token for pagination
+        reranker:
+          type: string
+          description: Optional reranker name/id to apply after initial retrieval
+          example: "bge-reranker-v2"
+        return_fields:
+          type: array
+          description: Restrict fields in each hit for performance
+          items:
+            type: string
+          example: ["id","score","text","metadata","source_url","timestamp"]
+      required: [query]
+
+    SearchHit:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Internal identifier for the chunk/document/memory
+        score:
+          type: number
+          description: Similarity or rerank score (higher is better)
+        text:
+          type: string
+          description: Retrieved text/chunk
+        source_type:
+          type: string
+          enum: [document, memory, note, page, transcript, web]
+          description: Origin type of this hit
+        source_url:
+          type: string
+          description: Canonical URL (if available)
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary metadata (file, path, author, tags, etc.)
+        timestamp:
+          type: string
+          format: date-time
+          description: When this content was created or captured
+        span:
+          type: object
+          description: Optional start/end offsets within the source
+          properties:
+            start:
+              type: integer
+            end:
+              type: integer
+
+    SearchResponse:
+      type: object
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchHit"
+        total_estimated:
+          type: integer
+          description: Approximate total matches
+        next_page_token:
+          type: string
+          description: Opaque token for fetching the next page
+        debug:
+          type: object
+          description: Optional diagnostics for tuning retrieval
+          additionalProperties: true
+      required: [hits]
+
+    UploadRequest:
+      type: object
+      properties:
+        file:
+          type: string
+          format: binary
+          description: File to be uploaded (PDF, MD, DOCX, HTML)
+      required: [file]
+
+    UploadResponse:
+      type: object
+      properties:
+        file_id:
+          type: string
+          description: Unique identifier of the stored file
+        status:
+          type: string
+          example: "uploaded"
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "ok"
 
 paths:
-  /healthz:
-    get:
-      operationId: healthz
-      security: []    # no auth
-      responses: { '200': { description: ok } }
-
-  /debug/memories:
-    get:
-      operationId: debugMemories
-      security: []    # no auth
-      responses: { '200': { description: ok } }
-
-  /debug/ping:
-    get:
-      operationId: ping
-      security: []    # no auth
-      responses: { '200': { description: ok } }
-
-  /debug/echo:
+  /chat:
     post:
-      operationId: echo
-      security: []    # no auth to remove all auth variables
+      summary: Send messages to SUAPS Brain for contextualized answers
+      operationId: chat_post
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              type: object
+              $ref: "#/components/schemas/ChatRequest"
       responses:
-        '200':
-          description: ok
+        "200":
+          description: Response from SUAPS Brain
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
 
-  /ingest/batch:
+  # ---------- NEW: /search ----------
+  /search:
     post:
-      operationId: ingestBatch
+      summary: Retrieve relevant chunks/memories without synthesis
+      operationId: search_post
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              properties:
-                items:
-                  type: array
-                  minItems: 1
-                  items: { $ref: '#/components/schemas/IngestItem' }
-                dedupe: { type: boolean }
-              required: [items]
+              $ref: "#/components/schemas/SearchRequest"
       responses:
-        '200': { description: ok }
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+        "400":
+          description: Invalid request (e.g., missing query)
+        "401":
+          description: Unauthorized (missing/invalid API key)
+        "500":
+          description: Internal error
 
-    /memories/upsert:
-    post:
-      operationId: memoriesUpsert
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              properties:
-                type: { type: string, enum: [semantic, episodic, procedural] }
-                title: { type: string }
-                content: { type: string }
-                importance: { type: integer }
-                tags: { type: array, items: { type: string } }
-                user_email: { type: string }
-                user_id: { type: string }
-              required: [type, content]
-      responses: { '200': { description: ok } }
-
-
-    /chat:
-    post:
-      operationId: chat
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              properties:
-                prompt: { type: string }
-                session_id: { type: string }
-                role: { type: string, enum: [researcher, staff, director, admin] }
-                preferences: { type: object, additionalProperties: true }
-                debug: { type: boolean }
-              required: [prompt]
-      responses: { '200': { description: ok } }
   /upload:
     post:
-      operationId: upload
+      summary: Upload files into SUAPS Brain memory
+      operationId: upload_file
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
+              $ref: "#/components/schemas/UploadRequest"
+      responses:
+        "200":
+          description: File successfully uploaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+
+  /ingest/batch:
+    post:
+      summary: Ingest multiple documents in batch
+      operationId: ingest_batch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
               type: object
               properties:
-                file: { type: string, format: binary }
-                tags: { type: string }
+                files:
+                  type: array
+                  items:
+                    type: string
+                  description: List of file paths or IDs to ingest
+              required: [files]
       responses:
-        '200': { description: ok }
+        "200":
+          description: Documents ingested successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingested:
+                    type: integer
+                    example: 5
 
-components:
-  schemas:
-    IngestItem:
-      type: object
-      additionalProperties: false
-      properties:
-        user_email: { type: string }
-        title: { type: string }
-        text: { type: string }
-        type: { type: string, enum: [semantic, episodic, procedural] }
-        tags: { type: array, items: { type: string } }
-        source: { type: string }
-        role_view: { type: array, items: { type: string } }
-        file_id: { type: string }
-        session_id: { type: string }
-        dedupe: { type: boolean }
-      required: [text, type]
+  /memories/upsert:
+    post:
+      summary: Insert or update a memory in SUAPS Brain
+      operationId: memories_upsert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                memory_id:
+                  type: string
+                  format: uuid
+                content:
+                  type: string
+                  description: Text or decision to be stored
+                tags:
+                  type: array
+                  items:
+                    type: string
+                  description: Tags linked to the memory
+              required: [content]
+      responses:
+        "200":
+          description: Memory created or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory_id:
+                    type: string
+
+  /healthz:
+    get:
+      summary: Check if SUAPS Brain service is running
+      operationId: health_check
+      responses:
+        "200":
+          description: Service operational
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /debug/selftest:
+    get:
+      summary: Run self-diagnostics on system latency and components
+      operationId: debug_selftest
+      responses:
+        "200":
+          description: Self-diagnostic metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pinecone_latency_ms:
+                    type: number
+                    example: 120
+                  supabase_latency_ms:
+                    type: number
+                    example: 85
+                  openai_latency_ms:
+                    type: number
+                    example: 210
