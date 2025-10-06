@@ -174,6 +174,7 @@ async def upload_file(
     updated  = _safe_len(getattr(ingest_result, "get", lambda *_: [])("updated",  [])) if isinstance(ingest_result, dict) else 0
     skipped  = _safe_len(getattr(ingest_result, "get", lambda *_: [])("skipped",  [])) if isinstance(ingest_result, dict) else 0
 
+    result = upsert_memories_from_chunks(...)
     return {
         "status": "ok",
         "file_name": file.filename,
@@ -182,9 +183,9 @@ async def upload_file(
         "bytes": len(raw),
         "chunks": len(chunks),
         "ingest": {
-            "upserted": upserted,
-            "updated": updated,
-            "skipped": skipped,
+            "upserted": result.upserted,
+            "updated": result.updated,
+            "skipped": result.skipped,
             "raw": ingest_result,  # keep original for debugging
         },
         "extraction_enabled": bool(extract_signals),
