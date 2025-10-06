@@ -79,3 +79,24 @@ def debug_selftest_get(x_api_key: Optional[str] = Header(None)):
         "pinecone_roundtrip": ok_round,
         "latency_ms": lat,
     }
+def _embedding_dim(client, model, dim_override=None):
+    # create a tiny embedding to measure the real output size
+    kwargs = {"model": model, "input": "dimension check"}
+    if dim_override:
+        kwargs["dimensions"] = dim_override
+    vec = client.embeddings.create(**kwargs).data[0].embedding
+    return len(vec)
+
+@router.get("/debug/selftest")
+def selftest():
+    model = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+    dim_override = os.getenv("EMBED_DIM")
+    dim = _embedding_dim(client, model, int(dim_override) if dim_override else None)
+
+    index = get_index()
+    # assuming your vendor has index.describe() or you stored it during creation
+    index_dim = index._description.dimension  # adapt to your client
+
+    if dim != index_dim:
+        return {"ok": False, "error": f"Embedding dim {dim} != Pinecone index dim {index_dim}"}
+    return {"ok": True, "embedding_dim": dim, "index_dim": index_dim}
