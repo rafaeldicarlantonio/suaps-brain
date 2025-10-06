@@ -168,13 +168,19 @@ async def upload_file(
             autosave_error = str(e)
             print("Extractor/autosave failed:", autosave_error)
 
-    # --- stable response for Make/Slack/Email ---
+        # --- stable response for Make/Slack/Email ---
     # Try to extract common counts from ingest_result without assuming shape
-    upserted = _safe_len(getattr(ingest_result, "get", lambda *_: [])("upserted", [])) if isinstance(ingest_result, dict) else 0
-    updated  = _safe_len(getattr(ingest_result, "get", lambda *_: [])("updated",  [])) if isinstance(ingest_result, dict) else 0
-    skipped  = _safe_len(getattr(ingest_result, "get", lambda *_: [])("skipped",  [])) if isinstance(ingest_result, dict) else 0
+    def _get(d: Dict[str, Any], key: str) -> int:
+        try:
+            v = d.get(key, [])
+            return len(v) if isinstance(v, list) else int(v or 0)
+        except Exception:
+            return 0
 
-    result = upsert_memories_from_chunks(...)
+    upserted = _get(ingest_result, "upserted")
+    updated  = _get(ingest_result, "updated")
+    skipped  = _get(ingest_result, "skipped")
+
     return {
         "status": "ok",
         "file_name": file.filename,
@@ -183,9 +189,9 @@ async def upload_file(
         "bytes": len(raw),
         "chunks": len(chunks),
         "ingest": {
-            "upserted": result.upserted,
-            "updated": result.updated,
-            "skipped": result.skipped,
+            "upserted": upserted,
+            "updated": updated,
+            "skipped": skipped,
             "raw": ingest_result,  # keep original for debugging
         },
         "extraction_enabled": bool(extract_signals),
