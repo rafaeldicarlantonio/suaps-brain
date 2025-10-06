@@ -268,6 +268,7 @@ def upsert_memories_from_chunks(
         title = meta["title"] or f"{title_prefix} — part {idx + 1}"
         summary = meta["summary"]
        tagset = [str(t) for t in (tags or []) + meta["tags"]]
+role_view = [str(r) for r in (role_view or [])]
 
         # ============================================================
         # Path A: update-in-place for near-duplicate (mode == "update")
