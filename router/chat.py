@@ -23,7 +23,7 @@ client = OpenAI()
 
 
 # ---------- Models ----------
-cclass ChatReq(BaseModel):
+class ChatReq(BaseModel):
     prompt: Optional[str] = None
     messages: Optional[List[Dict[str, str]]] = None
     session_id: Optional[str] = None
