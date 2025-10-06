@@ -3,7 +3,7 @@ import os
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, ConfigDict
 from openai import OpenAI
 
 from vendors.supabase_client import get_client
@@ -22,12 +22,15 @@ class SearchReq(BaseModel):
     top_k: int = Field(12, ge=1, le=50)
     include_text: bool = True
 
-    @root_validator(pre=True)
-    def unify_query(cls, values):
-        q = values.get("q")
-        query = values.get("query")
-        values["q"] = q or query
-        return values
+    # tolerate extra fields from older callers instead of 422
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    def unify_query(cls, v):
+        if isinstance(v, dict):
+            q = v.get("q") or v.get("query")
+            v["q"] = q
+        return v
 
 class SearchItem(BaseModel):
     id: str
