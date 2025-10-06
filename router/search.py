@@ -3,7 +3,7 @@ import os
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, model_validator
 from openai import OpenAI
 
 from vendors.supabase_client import get_client
