@@ -261,35 +261,53 @@ def upsert_memories_from_chunks(
                 memory_id = nearest["id"]
 
                 # embed + upsert vector
-                vec = embed(text)
-                if vec:
-                    vector_id = f"mem_{memory_id}"
-                    namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
-                    eid_list = link_entities(sb, memory_id, llm_entities(text))
-                    metadata = {
-                        "type": mem_type,
-                        "title": title,
-                        "tags": tagset,
-                        "created_at": now_iso(),
-                        "role_view": role_view,
-                        "entity_ids": eid_list,
-                        "source": source,
-                        "author_user_id": author_user_id,
-                    }
-                    pinecone_index.upsert(
-                        vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
-                        namespace=namespace,
-                    )
-                    try:
-                        sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
-                    except Exception:
-                        pass
+               # embed + upsert vector  (FIXED)
+vec = embed(text)
 
-                updated.append({"idx": idx, "memory_id": memory_id, "hd": best_hd})
-                continue
-            except Exception:
-                # fall through to insert-as-new if update failed
-                pass
+if not vec:
+    # record failure and still try to link entities for graph analytics
+    try:
+        link_entities(sb, memory_id, llm_entities(text))
+    except Exception:
+        pass
+    skipped.append({"idx": idx, "reason": "embed_failed"})
+else:
+    vector_id = f"mem_{memory_id}"
+    namespace = {
+        "semantic": "semantic",
+        "episodic": "episodic",
+        "procedural": "procedural",
+    }[mem_type]
+
+    # best effort: entity extraction should never crash the ingest
+    try:
+        eid_list = link_entities(sb, memory_id, llm_entities(text))
+    except Exception:
+        eid_list = []
+
+    metadata = {
+        "type": mem_type,
+        "title": title,
+        "tags": tagset,
+        "created_at": now_iso(),
+        "role_view": role_view,
+        "entity_ids": eid_list,
+        "source": source,
+        "author_user_id": author_user_id,
+    }
+
+    try:
+        pinecone_index.upsert(
+            vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
+            namespace=namespace,
+        )
+        # only set embedding_id if upsert succeeded
+        sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
+    except Exception as e:
+        # surface the real cause to the caller instead of pretending it's fine
+        skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
+        # do NOT set embedding_id on failure
+
 
         # ---- insert brand-new row
         payload = {
@@ -330,32 +348,53 @@ def upsert_memories_from_chunks(
             continue
 
         # embed + upsert vector
-        vec = embed(text)
-        if vec:
-            try:
-                vector_id = f"mem_{memory_id}"
-                namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
-                eid_list = link_entities(sb, memory_id, llm_entities(text))
-                metadata = {
-                    "type": mem_type,
-                    "title": title,
-                    "tags": tagset,
-                    "created_at": now_iso(),
-                    "role_view": role_view,
-                    "entity_ids": eid_list,
-                    "source": source,
-                    "author_user_id": author_user_id,
-                }
-                pinecone_index.upsert(
-                    vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
-                    namespace=namespace,
-                )
-                try:
-                    sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
-                except Exception:
-                    pass
-            except Exception:
-                pass
+        # embed + upsert vector  (FIXED)
+vec = embed(text)
+
+if not vec:
+    # record failure and still try to link entities for graph analytics
+    try:
+        link_entities(sb, memory_id, llm_entities(text))
+    except Exception:
+        pass
+    skipped.append({"idx": idx, "reason": "embed_failed"})
+else:
+    vector_id = f"mem_{memory_id}"
+    namespace = {
+        "semantic": "semantic",
+        "episodic": "episodic",
+        "procedural": "procedural",
+    }[mem_type]
+
+    # best effort: entity extraction should never crash the ingest
+    try:
+        eid_list = link_entities(sb, memory_id, llm_entities(text))
+    except Exception:
+        eid_list = []
+
+    metadata = {
+        "type": mem_type,
+        "title": title,
+        "tags": tagset,
+        "created_at": now_iso(),
+        "role_view": role_view,
+        "entity_ids": eid_list,
+        "source": source,
+        "author_user_id": author_user_id,
+    }
+
+    try:
+        pinecone_index.upsert(
+            vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
+            namespace=namespace,
+        )
+        # only set embedding_id if upsert succeeded
+        sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
+    except Exception as e:
+        # surface the real cause to the caller instead of pretending it's fine
+        skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
+        # do NOT set embedding_id on failure
+
         else:
             # still extract+link entities for graph even if embedding failed
             try:
