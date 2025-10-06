@@ -1,4 +1,5 @@
 # ingest/pipeline.py
+
 import os
 import re
 import hashlib
@@ -165,9 +166,6 @@ def link_entities(sb, memory_id: str, ents: List[Dict[str, str]]) -> List[str]:
 # -----------------------------
 # Main upsert pipeline (used by upload/ingest and autosave)
 # -----------------------------
-# -----------------------------
-# Main upsert pipeline (used by upload/ingest and autosave)
-# -----------------------------
 def upsert_memories_from_chunks(
     *,
     sb,
@@ -267,8 +265,8 @@ def upsert_memories_from_chunks(
         meta = llm_chunk_meta(text)
         title = meta["title"] or f"{title_prefix} — part {idx + 1}"
         summary = meta["summary"]
-       tagset = [str(t) for t in (tags or []) + meta["tags"]]
-role_view = [str(r) for r in (role_view or [])]
+        tagset = [str(t) for t in (tags or []) + meta["tags"]]
+        role_view = [str(r) for r in (role_view or [])]
 
         # ============================================================
         # Path A: update-in-place for near-duplicate (mode == "update")
@@ -310,21 +308,21 @@ role_view = [str(r) for r in (role_view or [])]
             namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
             try:
                 try:
-                    eid_list = link_entities(sb, memory_id, llm_entities(text))
+                    eid_list = link_entities(sb, memory_id, llm_entities(text)) or []
                 except Exception:
                     eid_list = []
 
-             # build Pinecone-safe metadata
-metadata = _sanitize_metadata({
-    "type": mem_type,
-    "title": title,
-    "tags": tagset,           # list[str]
-    "created_at": now_iso(),  # string
-    "role_view": role_view,   # list[str]
-    "entity_ids": eid_list,   # list -> coerced to list[str]
-    "source": source,         # string
-    "author_user_id": author_user_id,  # omitted if None
-})
+                # build Pinecone-safe metadata
+                metadata = _sanitize_metadata({
+                    "type": mem_type,
+                    "title": title,
+                    "tags": tagset,
+                    "created_at": now_iso(),
+                    "role_view": role_view,
+                    "entity_ids": eid_list,
+                    "source": source,
+                    "author_user_id": author_user_id,  # omitted if None
+                })
 
                 vector_id = f"mem_{memory_id}"
                 pinecone_index.upsert(
@@ -391,22 +389,21 @@ metadata = _sanitize_metadata({
         namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
         try:
             try:
-    eid_list = link_entities(sb, memory_id, llm_entities(text)) or []
-except Exception:
-    eid_list = []
+                eid_list = link_entities(sb, memory_id, llm_entities(text)) or []
+            except Exception:
+                eid_list = []
 
             # build Pinecone-safe metadata
-metadata = _sanitize_metadata({
-    "type": mem_type,
-    "title": title,
-    "tags": tagset,           # list[str]
-    "created_at": now_iso(),  # string
-    "role_view": role_view,   # list[str]
-    "entity_ids": eid_list,   # list -> coerced to list[str]
-    "source": source,         # string
-    "author_user_id": author_user_id,  # omitted if None
-})
-
+            metadata = _sanitize_metadata({
+                "type": mem_type,
+                "title": title,
+                "tags": tagset,
+                "created_at": now_iso(),
+                "role_view": role_view,
+                "entity_ids": eid_list,
+                "source": source,
+                "author_user_id": author_user_id,  # omitted if None
+            })
 
             vector_id = f"mem_{memory_id}"
             pinecone_index.upsert(
