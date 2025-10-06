@@ -6,7 +6,7 @@ from uuid import uuid4
 from typing import Optional, List, Dict, Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 from openai import OpenAI
 
 from vendors.supabase_client import get_client
@@ -24,12 +24,24 @@ client = OpenAI()
 
 # ---------- Models ----------
 class ChatReq(BaseModel):
-    prompt: str
+    prompt: Optional[str] = None
+    messages: Optional[List[Dict[str, str]]] = None
     session_id: Optional[str] = None
     role: Optional[Literal["researcher", "staff", "director", "admin"]] = None
     preferences: Optional[Dict[str, Any]] = None
     debug: bool = False
+    model_config = ConfigDict(extra="ignore")
 
+    @model_validator(mode="before")
+    def coerce_prompt(cls, v):
+        if isinstance(v, dict) and not v.get("prompt"):
+            msgs = v.get("messages") or []
+            if msgs:
+                user_bits = [m.get("content","") for m in msgs if m.get("role")=="user"]
+                v["prompt"] = " ".join(user_bits)[:4000] or None
+        if isinstance(v, dict) and not v.get("prompt"):
+            raise ValueError("prompt or messages is required")
+        return v
 
 class ChatResp(BaseModel):
     session_id: str
