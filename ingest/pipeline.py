@@ -262,6 +262,7 @@ def upsert_memories_from_chunks(
 
                 # embed + upsert vector
                # embed + upsert vector  (FIXED)
+# embed + upsert vector  (FIXED)
 vec = embed(text)
 
 if not vec:
@@ -307,6 +308,7 @@ else:
         # surface the real cause to the caller instead of pretending it's fine
         skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
         # do NOT set embedding_id on failure
+
 
 
         # ---- insert brand-new row
