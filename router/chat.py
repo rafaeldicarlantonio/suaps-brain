@@ -23,25 +23,28 @@ client = OpenAI()
 
 
 # ---------- Models ----------
-class ChatReq(BaseModel):
+cclass ChatReq(BaseModel):
     prompt: Optional[str] = None
     messages: Optional[List[Dict[str, str]]] = None
     session_id: Optional[str] = None
     role: Optional[Literal["researcher", "staff", "director", "admin"]] = None
     preferences: Optional[Dict[str, Any]] = None
     debug: bool = False
+
+    # allow unknown fields instead of 422'ing
     model_config = ConfigDict(extra="ignore")
 
+    # automatically create a prompt from messages[] if none is provided
     @model_validator(mode="before")
-    def coerce_prompt(cls, v):
-        if isinstance(v, dict) and not v.get("prompt"):
-            msgs = v.get("messages") or []
-            if msgs:
-                user_bits = [m.get("content","") for m in msgs if m.get("role")=="user"]
-                v["prompt"] = " ".join(user_bits)[:4000] or None
-        if isinstance(v, dict) and not v.get("prompt"):
+    def ensure_prompt(cls, values):
+        if isinstance(values, dict) and not values.get("prompt"):
+            msgs = values.get("messages") or []
+            user_bits = [m.get("content", "") for m in msgs if m.get("role") == "user"]
+            if user_bits:
+                values["prompt"] = " ".join(user_bits)[:4000]
+        if isinstance(values, dict) and not values.get("prompt"):
             raise ValueError("prompt or messages is required")
-        return v
+        return values
 
 class ChatResp(BaseModel):
     session_id: str
