@@ -146,6 +146,9 @@ def link_entities(sb, memory_id: str, ents: List[Dict[str, str]]) -> List[str]:
 # -----------------------------
 # Main upsert pipeline (used by upload/ingest and autosave)
 # -----------------------------
+# -----------------------------
+# Main upsert pipeline (used by upload/ingest and autosave)
+# -----------------------------
 def upsert_memories_from_chunks(
     *,
     sb,
@@ -200,28 +203,36 @@ def upsert_memories_from_chunks(
         sh_s = u64_to_signed(sh_u)    # signed BIGINT-safe
 
         # ---- exact duplicate
-        existing = (
-            sb.table("memories")
-            .select("id,embedding_id")
-            .eq("dedupe_hash", dedupe_hash)
-            .limit(1)
-            .execute()
-        )
-        rows = existing.data if hasattr(existing, "data") else existing.get("data")
+        try:
+            existing = (
+                sb.table("memories")
+                .select("id,embedding_id")
+                .eq("dedupe_hash", dedupe_hash)
+                .limit(1)
+                .execute()
+            )
+            rows = existing.data if hasattr(existing, "data") else existing.get("data")
+        except Exception:
+            rows = None
+
         if rows:
             skipped.append({"idx": idx, "reason": "duplicate", "memory_id": rows[0]["id"]})
             continue
 
         # ---- near-duplicate search (recent, same type)
-        near = (
-            sb.table("memories")
-            .select(f"id,{text_col},simhash64,created_at")
-            .eq("type", mem_type)
-            .order("created_at", desc=True)
-            .limit(50)
-            .execute()
-        )
-        near_rows = near.data if hasattr(near, "data") else near.get("data") or []
+        try:
+            near = (
+                sb.table("memories")
+                .select(f"id,{text_col},simhash64,created_at")
+                .eq("type", mem_type)
+                .order("created_at", desc=True)
+                .limit(50)
+                .execute()
+            )
+            near_rows = near.data if hasattr(near, "data") else near.get("data") or []
+        except Exception:
+            near_rows = []
+
         nearest = None
         best_hd = 65
         for r in near_rows:
@@ -239,7 +250,9 @@ def upsert_memories_from_chunks(
         summary = meta["summary"]
         tagset = list({*(tags or []), *meta["tags"]})
 
-        # ---- update-in-place for near-dup
+        # ============================================================
+        # Path A: update-in-place for near-duplicate (mode == "update")
+        # ============================================================
         if nearest and best_hd <= sim_thresh and mode == "update":
             try:
                 upd = {
@@ -259,59 +272,53 @@ def upsert_memories_from_chunks(
 
                 sb.table("memories").update(upd).eq("id", nearest["id"]).execute()
                 memory_id = nearest["id"]
+            except Exception as e:
+                skipped.append({"idx": idx, "reason": "update_failed", "error": str(e)})
+                continue
 
-                # embed + upsert vector
-               # embed + upsert vector  (FIXED)
-# embed + upsert vector  (FIXED)
-vec = embed(text)
+            # ---- embed + upsert vector (safe, no swallowed exceptions)
+            vec = embed(text)
+            if not vec:
+                # still try to link entities
+                try:
+                    link_entities(sb, memory_id, llm_entities(text))
+                except Exception:
+                    pass
+                skipped.append({"idx": idx, "reason": "embed_failed"})
+                continue
 
-if not vec:
-    # record failure and still try to link entities for graph analytics
-    try:
-        link_entities(sb, memory_id, llm_entities(text))
-    except Exception:
-        pass
-    skipped.append({"idx": idx, "reason": "embed_failed"})
-else:
-    vector_id = f"mem_{memory_id}"
-    namespace = {
-        "semantic": "semantic",
-        "episodic": "episodic",
-        "procedural": "procedural",
-    }[mem_type]
+            namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
+            try:
+                try:
+                    eid_list = link_entities(sb, memory_id, llm_entities(text))
+                except Exception:
+                    eid_list = []
 
-    # best effort: entity extraction should never crash the ingest
-    try:
-        eid_list = link_entities(sb, memory_id, llm_entities(text))
-    except Exception:
-        eid_list = []
+                metadata = {
+                    "type": mem_type,
+                    "title": title,
+                    "tags": tagset,
+                    "created_at": now_iso(),
+                    "role_view": role_view,
+                    "entity_ids": eid_list,
+                    "source": source,
+                    "author_user_id": author_user_id,
+                }
 
-    metadata = {
-        "type": mem_type,
-        "title": title,
-        "tags": tagset,
-        "created_at": now_iso(),
-        "role_view": role_view,
-        "entity_ids": eid_list,
-        "source": source,
-        "author_user_id": author_user_id,
-    }
+                vector_id = f"mem_{memory_id}"
+                pinecone_index.upsert(
+                    vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
+                    namespace=namespace,
+                )
+                sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
+                updated.append({"idx": idx, "memory_id": memory_id})
+            except Exception as e:
+                skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
+            continue  # end Path A
 
-    try:
-        pinecone_index.upsert(
-            vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
-            namespace=namespace,
-        )
-        # only set embedding_id if upsert succeeded
-        sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
-    except Exception as e:
-        # surface the real cause to the caller instead of pretending it's fine
-        skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
-        # do NOT set embedding_id on failure
-
-
-
-        # ---- insert brand-new row
+        # ==============================
+        # Path B: insert a brand-new row
+        # ==============================
         payload = {
             "type": mem_type,
             "title": title,
@@ -349,62 +356,45 @@ else:
             skipped.append({"idx": idx, "reason": "insert_select_missed"})
             continue
 
-        # embed + upsert vector
-        # embed + upsert vector  (FIXED)
-vec = embed(text)
-
-if not vec:
-    # record failure and still try to link entities for graph analytics
-    try:
-        link_entities(sb, memory_id, llm_entities(text))
-    except Exception:
-        pass
-    skipped.append({"idx": idx, "reason": "embed_failed"})
-else:
-    vector_id = f"mem_{memory_id}"
-    namespace = {
-        "semantic": "semantic",
-        "episodic": "episodic",
-        "procedural": "procedural",
-    }[mem_type]
-
-    # best effort: entity extraction should never crash the ingest
-    try:
-        eid_list = link_entities(sb, memory_id, llm_entities(text))
-    except Exception:
-        eid_list = []
-
-    metadata = {
-        "type": mem_type,
-        "title": title,
-        "tags": tagset,
-        "created_at": now_iso(),
-        "role_view": role_view,
-        "entity_ids": eid_list,
-        "source": source,
-        "author_user_id": author_user_id,
-    }
-
-    try:
-        pinecone_index.upsert(
-            vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
-            namespace=namespace,
-        )
-        # only set embedding_id if upsert succeeded
-        sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
-    except Exception as e:
-        # surface the real cause to the caller instead of pretending it's fine
-        skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
-        # do NOT set embedding_id on failure
-
-        else:
+        # ---- embed + upsert vector (safe)
+        vec = embed(text)
+        if not vec:
             # still extract+link entities for graph even if embedding failed
             try:
                 link_entities(sb, memory_id, llm_entities(text))
             except Exception:
                 pass
+            skipped.append({"idx": idx, "reason": "embed_failed"})
+            continue
 
-        created.append({"idx": idx, "memory_id": memory_id})
+        namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
+        try:
+            try:
+                eid_list = link_entities(sb, memory_id, llm_entities(text))
+            except Exception:
+                eid_list = []
 
-    # final return
-    return {"upserted": created, "skipped": skipped, "updated": updated}
+            metadata = {
+                "type": mem_type,
+                "title": title,
+                "tags": tagset,
+                "created_at": now_iso(),
+                "role_view": role_view,
+                "entity_ids": eid_list,
+                "source": source,
+                "author_user_id": author_user_id,
+            }
+
+            vector_id = f"mem_{memory_id}"
+            pinecone_index.upsert(
+                vectors=[{"id": vector_id, "values": vec, "metadata": metadata}],
+                namespace=namespace,
+            )
+            sb.table("memories").update({"embedding_id": vector_id}).eq("id", memory_id).execute()
+            created.append({"idx": idx, "memory_id": memory_id})
+        except Exception as e:
+            skipped.append({"idx": idx, "reason": "upsert_failed", "error": str(e)})
+            # do NOT set embedding_id on failure; leave created entry out
+
+    # final return (after processing all chunks)
+    return {"upserted": created, "updated": updated, "skipped": skipped}
