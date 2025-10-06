@@ -267,7 +267,7 @@ def upsert_memories_from_chunks(
         meta = llm_chunk_meta(text)
         title = meta["title"] or f"{title_prefix} — part {idx + 1}"
         summary = meta["summary"]
-        tagset = list({*(tags or []), *meta["tags"]})
+       tagset = [str(t) for t in (tags or []) + meta["tags"]]
 
         # ============================================================
         # Path A: update-in-place for near-duplicate (mode == "update")
@@ -390,9 +390,9 @@ metadata = _sanitize_metadata({
         namespace = {"semantic": "semantic", "episodic": "episodic", "procedural": "procedural"}[mem_type]
         try:
             try:
-                eid_list = link_entities(sb, memory_id, llm_entities(text))
-            except Exception:
-                eid_list = []
+    eid_list = link_entities(sb, memory_id, llm_entities(text)) or []
+except Exception:
+    eid_list = []
 
             # build Pinecone-safe metadata
 metadata = _sanitize_metadata({
