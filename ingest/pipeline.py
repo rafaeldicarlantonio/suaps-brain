@@ -336,8 +336,8 @@ def upsert_memories_from_chunks(
 
         try:
             ins = sb.table("memories").insert(payload).execute()
-        except Exception:
-            skipped.append({"idx": idx, "reason": "insert_failed"})
+        except Exception as e:
+            skipped.append({"idx": idx, "reason": "insert_failed", "error": str(e)})
             continue
 
         # fetch id
