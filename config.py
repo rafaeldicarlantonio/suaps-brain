@@ -6,7 +6,6 @@ import os
 REQUIRED = [
     "OPENAI_API_KEY",
     "SUPABASE_URL",
-    "SUPABASE_ANON_KEY",
     "PINECONE_API_KEY",
     "PINECONE_INDEX",
 ]
