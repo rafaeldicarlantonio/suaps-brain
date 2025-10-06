@@ -13,6 +13,25 @@ from ingest.simhash import simhash64, hamming  # expects your existing file
 def now_iso() -> str:
     return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat()
 
+def _sanitize_metadata(md: dict) -> dict:
+    """
+    Pinecone metadata can only contain: string, number, boolean, or list of strings.
+    - Drop None values entirely
+    - Coerce lists to list[str] (skip None entries)
+    - Stringify anything weird (datetime, UUID, etc.)
+    """
+    out = {}
+    for k, v in md.items():
+        if v is None:
+            continue
+        if isinstance(v, (str, int, float, bool)):
+            out[k] = v
+        elif isinstance(v, list):
+            out[k] = [str(x) for x in v if x is not None]
+        else:
+            out[k] = str(v)
+    return out
+
 def normalize_text(s: str) -> str:
     s = s or ""
     s = re.sub(r"\r\n", "\n", s)
@@ -294,16 +313,17 @@ def upsert_memories_from_chunks(
                 except Exception:
                     eid_list = []
 
-                metadata = {
-                    "type": mem_type,
-                    "title": title,
-                    "tags": tagset,
-                    "created_at": now_iso(),
-                    "role_view": role_view,
-                    "entity_ids": eid_list,
-                    "source": source,
-                    "author_user_id": author_user_id,
-                }
+             # build Pinecone-safe metadata
+metadata = _sanitize_metadata({
+    "type": mem_type,
+    "title": title,
+    "tags": tagset,           # list[str]
+    "created_at": now_iso(),  # string
+    "role_view": role_view,   # list[str]
+    "entity_ids": eid_list,   # list -> coerced to list[str]
+    "source": source,         # string
+    "author_user_id": author_user_id,  # omitted if None
+})
 
                 vector_id = f"mem_{memory_id}"
                 pinecone_index.upsert(
@@ -374,16 +394,18 @@ def upsert_memories_from_chunks(
             except Exception:
                 eid_list = []
 
-            metadata = {
-                "type": mem_type,
-                "title": title,
-                "tags": tagset,
-                "created_at": now_iso(),
-                "role_view": role_view,
-                "entity_ids": eid_list,
-                "source": source,
-                "author_user_id": author_user_id,
-            }
+            # build Pinecone-safe metadata
+metadata = _sanitize_metadata({
+    "type": mem_type,
+    "title": title,
+    "tags": tagset,           # list[str]
+    "created_at": now_iso(),  # string
+    "role_view": role_view,   # list[str]
+    "entity_ids": eid_list,   # list -> coerced to list[str]
+    "source": source,         # string
+    "author_user_id": author_user_id,  # omitted if None
+})
+
 
             vector_id = f"mem_{memory_id}"
             pinecone_index.upsert(
